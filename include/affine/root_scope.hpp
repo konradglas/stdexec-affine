@@ -241,6 +241,7 @@ private:
     explicit task_handle(std::shared_ptr<detail::task_control> control)
         : _control(std::move(control)) {}
 
+    friend class root_scope;
     template<class Executor>
     friend task_handle spawn(affine_task<void, Executor>, const task_handle&);
     template<class Executor>
@@ -265,6 +266,10 @@ public:
 
     [[nodiscard]] bool completed() const noexcept {
         return _control->completed();
+    }
+
+    [[nodiscard]] task_handle handle() const {
+        return task_handle{_control};
     }
 
 private:
