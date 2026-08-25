@@ -61,9 +61,168 @@ struct task_promise_base : result_storage<T> {
     }
 };
 
+template<class T>
+concept has_member_co_await = requires(T&& value) {
+    std::forward<T>(value).operator co_await();
+};
+
+template<class T>
+concept has_adl_co_await = requires(T&& value) {
+    operator co_await(std::forward<T>(value));
+};
+
+template<class T>
+decltype(auto) get_awaiter(T&& value) {
+    if constexpr (has_member_co_await<T>)
+        return std::forward<T>(value).operator co_await();
+    else if constexpr (has_adl_co_await<T>)
+        return operator co_await(std::forward<T>(value));
+    else
+        return std::forward<T>(value);
+}
+
 template<class Awaitable>
-concept awaitable = requires(Awaitable&& value) {
-    std::forward<Awaitable>(value).await_ready();
+class stored_awaitable {
+    using value_type = std::remove_reference_t<Awaitable>;
+    static constexpr bool borrows = std::is_lvalue_reference_v<Awaitable>;
+    using storage_type = std::conditional_t<borrows,
+                                            std::reference_wrapper<value_type>,
+                                            value_type>;
+
+public:
+    explicit stored_awaitable(Awaitable&& value)
+        : storage_(make_storage(std::forward<Awaitable>(value))) {}
+
+    decltype(auto) get() && {
+        if constexpr (borrows)
+            return storage_.get();
+        else
+            return std::move(storage_);
+    }
+
+private:
+    static storage_type make_storage(Awaitable&& value) {
+        if constexpr (borrows)
+            return std::ref(value);
+        else
+            return std::forward<Awaitable>(value);
+    }
+
+    storage_type storage_;
+};
+
+template<class Executor>
+struct continuation_bridge {
+    struct promise_type;
+    using handle_type = std::coroutine_handle<promise_type>;
+
+    explicit continuation_bridge(handle_type handle) noexcept : handle_(handle) {}
+    continuation_bridge(continuation_bridge&& other) noexcept
+        : handle_(std::exchange(other.handle_, {})) {}
+    continuation_bridge& operator=(continuation_bridge&& other) noexcept {
+        if (this != &other) {
+            destroy();
+            handle_ = std::exchange(other.handle_, {});
+        }
+        return *this;
+    }
+    continuation_bridge(const continuation_bridge&) = delete;
+    ~continuation_bridge() { destroy(); }
+
+    [[nodiscard]] handle_type handle() const noexcept { return handle_; }
+
+private:
+    void destroy() noexcept {
+        if (handle_)
+            handle_.destroy();
+        handle_ = {};
+    }
+
+    handle_type handle_{};
+};
+
+template<class Executor>
+struct continuation_bridge<Executor>::promise_type {
+    Executor executor;
+    std::coroutine_handle<> continuation{};
+
+    promise_type(Executor executor, std::coroutine_handle<> continuation)
+        : executor(std::move(executor)), continuation(continuation) {}
+
+    continuation_bridge get_return_object() noexcept {
+        return continuation_bridge{handle_type::from_promise(*this)};
+    }
+    std::suspend_always initial_suspend() const noexcept { return {}; }
+    void return_void() const noexcept {}
+    void unhandled_exception() const noexcept { std::terminate(); }
+
+    struct final_awaiter {
+        bool await_ready() const noexcept { return false; }
+        std::coroutine_handle<> await_suspend(handle_type handle) const noexcept {
+            auto& promise = handle.promise();
+            if (!promise.continuation)
+                return std::noop_coroutine();
+            if (promise.executor.is_current_thread())
+                return promise.continuation;
+            if (!promise.executor.schedule(promise.continuation))
+                std::terminate();
+            return std::noop_coroutine();
+        }
+        void await_resume() const noexcept {}
+    };
+
+    final_awaiter final_suspend() const noexcept { return {}; }
+};
+
+template<class Executor>
+continuation_bridge<Executor> make_continuation_bridge(
+    Executor executor, std::coroutine_handle<> continuation) {
+    co_return;
+}
+
+template<class Awaitable, class Executor>
+class affine_awaitable {
+    using storage_type = stored_awaitable<Awaitable>;
+    using awaiter_type = std::remove_cvref_t<decltype(get_awaiter(
+        std::declval<storage_type&&>().get()))>;
+    using bridge_type = continuation_bridge<Executor>;
+
+public:
+    affine_awaitable(Awaitable&& awaitable, Executor executor)
+        : awaitable_(std::forward<Awaitable>(awaitable)),
+          awaiter_(get_awaiter(std::move(awaitable_).get())),
+          executor_(std::move(executor)) {}
+
+    bool await_ready() noexcept(noexcept(awaiter_.await_ready())) {
+        return awaiter_.await_ready();
+    }
+
+    auto await_suspend(std::coroutine_handle<> continuation) {
+        bridge_.emplace(make_continuation_bridge(executor_, continuation));
+        auto bridge_handle = bridge_->handle();
+
+        using result_type = decltype(awaiter_.await_suspend(bridge_handle));
+        if constexpr (std::is_void_v<result_type>) {
+            awaiter_.await_suspend(bridge_handle);
+        } else if constexpr (std::is_same_v<result_type, bool>) {
+            if (!awaiter_.await_suspend(bridge_handle)) {
+                bridge_.reset();
+                return false;
+            }
+        } else {
+            return awaiter_.await_suspend(bridge_handle);
+        }
+    }
+
+    decltype(auto) await_resume() {
+        return awaiter_.await_resume();
+    }
+
+private:
+    storage_type awaitable_;
+    awaiter_type awaiter_;
+    Executor executor_;
+    std::optional<bridge_type> bridge_;
 };
 
 } // namespace detail
@@ -288,6 +447,11 @@ struct affine_task<T, Executor>::promise_type : detail::task_promise_base<T> {
     };
 
     final_awaiter final_suspend() const noexcept { return {}; }
+    template<class Awaitable>
+    auto await_transform(Awaitable&& awaitable) {
+        return detail::affine_awaitable<Awaitable, Executor>{
+            std::forward<Awaitable>(awaitable), executor};
+    }
     template<class U> void return_value(U&& value) {
         this->value.emplace(std::forward<U>(value));
     }
@@ -324,6 +488,11 @@ struct affine_task<void, Executor>::promise_type : detail::task_promise_base<voi
     };
 
     final_awaiter final_suspend() const noexcept { return {}; }
+    template<class Awaitable>
+    auto await_transform(Awaitable&& awaitable) {
+        return detail::affine_awaitable<Awaitable, Executor>{
+            std::forward<Awaitable>(awaitable), executor};
+    }
     void return_void() const noexcept {}
 };
 

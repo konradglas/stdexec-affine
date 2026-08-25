@@ -3,9 +3,22 @@
 
 #include <exec/affine_task.hpp>
 
+#include <condition_variable>
 #include <deque>
 #include <memory>
 #include <thread>
+
+struct worker_awaitable {
+    bool await_ready() const noexcept { return false; }
+
+    void await_suspend(std::coroutine_handle<> continuation) const {
+        std::thread([continuation] {
+            continuation.resume();
+        }).detach();
+    }
+
+    int await_resume() const noexcept { return 7; }
+};
 
 class manual_executor {
 public:
@@ -19,6 +32,7 @@ public:
     bool schedule(std::coroutine_handle<> handle) {
         std::lock_guard lock(state_->mutex);
         state_->queue.push_back(handle);
+        state_->condition.notify_one();
         return true;
     }
 
@@ -28,8 +42,10 @@ public:
         while (!done()) {
             std::coroutine_handle<> next;
             {
-                std::lock_guard lock(state_->mutex);
-                REQUIRE_FALSE(state_->queue.empty());
+                std::unique_lock lock(state_->mutex);
+                state_->condition.wait(lock, [&] {
+                    return !state_->queue.empty();
+                });
                 next = state_->queue.front();
                 state_->queue.pop_front();
             }
@@ -42,6 +58,7 @@ private:
         explicit state(std::thread::id owner) : owner(owner) {}
         std::thread::id owner;
         std::mutex mutex;
+        std::condition_variable condition;
         std::deque<std::coroutine_handle<>> queue;
     };
     std::shared_ptr<state> state_;
@@ -58,6 +75,13 @@ exec::affine_task<int, manual_executor> nested(manual_executor executor) {
 exec::affine_task<void, manual_executor> mark_ran(manual_executor executor, bool& ran) {
     ran = true;
     co_return;
+}
+
+exec::affine_task<int, manual_executor> arbitrary_awaitable(
+    manual_executor executor, bool& resumed_on_owner) {
+    const auto value = co_await worker_awaitable{};
+    resumed_on_owner = executor.is_current_thread();
+    co_return value;
 }
 
 TEST_CASE("sync_wait drives the affine executor on its owner thread") {
@@ -79,4 +103,12 @@ TEST_CASE("task body does not run before start") {
     CHECK_FALSE(ran);
     exec::sync_wait(std::move(task));
     CHECK(ran);
+}
+
+TEST_CASE("arbitrary awaitables hop the continuation back to the executor") {
+    manual_executor executor;
+    bool resumed_on_owner = false;
+
+    CHECK(exec::sync_wait(arbitrary_awaitable(executor, resumed_on_owner)) == 7);
+    CHECK(resumed_on_owner);
 }
