@@ -25,17 +25,26 @@ namespace affine {
  */
 class main_thread_executor {
 public:
+    using current_thread_function = std::function<bool()>;
     using dispatch_function = std::function<void(std::function<void()>)>;
     using pump_function = std::function<void(std::function<bool()>)>;
 
     main_thread_executor(std::thread::id owner,
                           dispatch_function dispatch,
                           pump_function pump = {})
+        : main_thread_executor(
+              [owner] { return std::this_thread::get_id() == owner; },
+              std::move(dispatch),
+              std::move(pump)) {}
+
+    main_thread_executor(current_thread_function is_current,
+                         dispatch_function dispatch,
+                         pump_function pump = {})
         : _state(std::make_shared<state>(
-              owner, std::move(dispatch), std::move(pump))) {}
+              std::move(is_current), std::move(dispatch), std::move(pump))) {}
 
     bool is_current_thread() const noexcept {
-        return std::this_thread::get_id() == _state->_owner;
+        return _state->_is_current();
     }
 
     bool schedule(std::coroutine_handle<> handle) {
@@ -63,12 +72,18 @@ public:
         }
 
         auto state = _state;
-        dispatch([state = std::move(state), record = std::move(record)] {
-            if (record->claim()) {
-                state->remove_pending(record);
-                record->_callback();
-            }
-        });
+        auto dispatched_record = record;
+        try {
+            dispatch([state = std::move(state), record = std::move(dispatched_record)] {
+                if (record->claim()) {
+                    state->remove_pending(record);
+                    record->_callback();
+                }
+            });
+        } catch (...) {
+            remove_pending(record);
+            return false;
+        }
         return true;
     }
 
@@ -136,14 +151,14 @@ private:
     };
 
     struct state {
-        state(std::thread::id owner,
+        state(current_thread_function is_current,
               dispatch_function dispatch,
               pump_function pump)
-            : _owner(owner),
+            : _is_current(std::move(is_current)),
               _dispatch(std::move(dispatch)),
               _pump(std::move(pump)) {}
 
-        std::thread::id _owner;
+        current_thread_function _is_current;
         dispatch_function _dispatch;
         pump_function _pump;
         std::atomic<bool> _accepting = true;
