@@ -3,6 +3,7 @@
 #include <affine/executor.hpp>
 
 #include <atomic>
+#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -45,8 +46,11 @@ public:
         auto record = std::make_shared<callback_record>(std::move(callback));
         {
             std::lock_guard lock(_state->_mutex);
-            if (!_state->_accepting)
-                return false;
+            if (!_state->_accepting) {
+                _state->_ready.push_back(std::move(record));
+                _state->_condition.notify_all();
+                return true;
+            }
             dispatch = _state->_dispatch;
             _state->_pending.push_back(record);
         }
@@ -85,7 +89,7 @@ public:
     void run_until(Predicate&& done) {
         if (!is_current_thread())
             throw std::logic_error("main_thread_executor must be pumped on its owner thread");
-        if (!_state->_pump)
+        if (_state->_accepting.load(std::memory_order_acquire) && !_state->_pump)
             throw std::logic_error("main_thread_executor has no host event pump");
         std::function<bool()> done_function = std::forward<Predicate>(done);
         std::function<bool()> predicate = [this, &done_function] {
@@ -95,29 +99,26 @@ public:
             drain();
             if (done_function())
                 return;
-            _state->_pump(predicate);
+            if (_state->_accepting.load(std::memory_order_acquire)) {
+                _state->_pump(predicate);
+            } else {
+                _state->wait_until_ready(done_function);
+            }
         }
     }
 
     void close() noexcept {
-        dispatch_function dispatch;
         {
             std::lock_guard lock(_state->_mutex);
             if (!_state->_accepting.exchange(false, std::memory_order_acq_rel))
                 return;
-            dispatch = _state->_dispatch;
             for (auto& record : _state->_pending) {
                 if (record->claim())
                     _state->_ready.push_back(std::move(record));
             }
             _state->_pending.clear();
         }
-        if (dispatch) {
-            try {
-                dispatch([state = _state] {});
-            } catch (...) {
-            }
-        }
+        _state->_condition.notify_all();
     }
 
     [[nodiscard]] bool accepting() const noexcept {
@@ -150,12 +151,18 @@ private:
         pump_function _pump;
         std::atomic<bool> _accepting = true;
         mutable std::mutex _mutex;
+        std::condition_variable _condition;
         std::vector<std::shared_ptr<callback_record>> _pending;
         std::vector<std::shared_ptr<callback_record>> _ready;
 
         bool has_ready() const {
             std::lock_guard lock(_mutex);
             return !_ready.empty();
+        }
+
+        void wait_until_ready(const std::function<bool()>& done) {
+            std::unique_lock lock(_mutex);
+            _condition.wait(lock, [&] { return done() || !_ready.empty(); });
         }
     };
 

@@ -3,9 +3,11 @@
 
 #include <affine/affine_task.hpp>
 #include <affine/main_thread_executor.hpp>
+#include <affine/root_scope.hpp>
 
 #if defined(AFFINE_TEST_HAS_STDEXEC)
 #  include <affine/stdexec.hpp>
+#  include <exec/task.hpp>
 #endif
 
 #include <condition_variable>
@@ -140,6 +142,12 @@ affine::affine_task<int, manual_executor> arbitrary_awaitable(
     co_return value;
 }
 
+affine::affine_task<void, manual_executor> scoped_arbitrary_awaitable(
+    manual_executor executor, bool& resumed_on_owner) {
+    (void)co_await worker_awaitable{};
+    resumed_on_owner = executor.is_current_thread();
+}
+
 TEST_CASE("sync_wait drives the affine executor on its owner thread") {
     manual_executor executor;
     CHECK(affine::sync_wait(answer(executor)) == 42);
@@ -190,6 +198,18 @@ TEST_CASE("arbitrary awaitables hop the continuation back to the executor") {
     CHECK(resumed_on_owner);
 }
 
+TEST_CASE("root scope owns an active task until drain completes") {
+    manual_executor executor;
+    bool resumed_on_owner = false;
+    auto scope = affine::create_root_scope();
+
+    affine::spawn(scoped_arbitrary_awaitable(executor, resumed_on_owner), scope);
+    scope.close();
+    scope.drain();
+
+    CHECK(resumed_on_owner);
+}
+
 TEST_CASE("main thread executor bridges a host dispatch queue") {
     host_queue host;
     affine::main_thread_executor executor(
@@ -213,15 +233,15 @@ TEST_CASE("closing main thread executor makes queued callbacks harmless") {
         [&](std::function<void()> callback) { host.enqueue(std::move(callback)); });
 
     bool ran = false;
-    {
-        auto task = mark_ran(executor, ran);
-        std::thread worker([&] { task.start(); });
-        worker.join();
-        executor.close();
-    }
+    auto task = mark_ran(executor, ran);
+    std::thread worker([&] { task.start(); });
+    worker.join();
+    executor.close();
+    executor.drain();
 
     host.pump_until([&] { return host.empty(); });
-    CHECK_FALSE(ran);
+    CHECK(ran);
+    CHECK(task.done());
     CHECK_FALSE(executor.accepting());
 }
 
@@ -261,6 +281,26 @@ affine::affine_task<void, manual_executor> stopped_sender(
     co_return co_await stdexec::just_stopped();
 }
 
+exec::task<int> foreign_task() {
+    co_await worker_awaitable{};
+    co_return 42;
+}
+
+affine::affine_task<int, affine::main_thread_executor> scoped_child_task(
+    affine::main_thread_executor executor,
+    bool& resumed_on_owner) {
+    const auto result = co_await foreign_task();
+    resumed_on_owner = executor.is_current_thread();
+    co_return result;
+}
+
+affine::affine_task<void, affine::main_thread_executor> scoped_root_task(
+    affine::main_thread_executor executor,
+    int& result,
+    bool& resumed_on_owner) {
+    result = co_await scoped_child_task(executor, resumed_on_owner);
+}
+
 TEST_CASE("stdexec senders are adapted as affine awaitables") {
     manual_executor executor;
     CHECK(affine::sync_wait(sender_awaitable(executor)) == 99);
@@ -281,5 +321,25 @@ TEST_CASE("unwrapped stdexec stop becomes task cancellation") {
     CHECK_THROWS_AS(
         affine::sync_wait(stopped_sender(executor)),
         affine::operation_cancelled);
+}
+
+TEST_CASE("root scope drains a foreign task back onto the affine executor") {
+    host_queue host;
+    affine::main_thread_executor executor(
+        std::this_thread::get_id(),
+        [&](std::function<void()> callback) { host.enqueue(std::move(callback)); });
+
+    int result = 0;
+    bool resumed_on_owner = false;
+    auto scope = affine::create_root_scope();
+    affine::spawn(scoped_root_task(executor, result, resumed_on_owner), scope);
+
+    scope.close();
+    scope.drain();
+
+    CHECK(result == 42);
+    CHECK(resumed_on_owner);
+    CHECK_FALSE(executor.accepting());
+    CHECK(host.empty());
 }
 #endif

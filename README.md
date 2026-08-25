@@ -34,6 +34,25 @@ event-pump callbacks. Executors that own a ready queue may additionally model
 its owner thread before task frames are destroyed when claimed callbacks need
 to be completed.
 
+Detached roots are owned explicitly through `<affine/root_scope.hpp>`:
+
+```cpp
+auto root_scope = affine::create_root_scope();
+affine::spawn(root_task(executor), root_scope);
+
+// During teardown, on the executor's owner thread:
+root_scope.close();
+root_scope.drain();
+```
+
+`close()` requests cooperative stop and closes executors that provide a
+`close()` operation. In-flight operations may still publish their final
+continuation into the executor's local ready queue. `drain()` keeps every root
+frame alive and drives that queue until all structurally awaited work has
+finished; only then are the frames destroyed.
+The last `root_scope` handle must not be destroyed while it still owns tasks;
+call `close()` and `drain()` during teardown.
+
 Tasks support cooperative cancellation through their context:
 
 ```cpp
