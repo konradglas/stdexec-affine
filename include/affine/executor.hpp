@@ -2,24 +2,8 @@
 
 #include <concepts>
 #include <coroutine>
-#include <atomic>
-#include <memory>
 
 namespace affine {
-
-class callback_lifetime {
-public:
-    void close() noexcept {
-        _open.store(false, std::memory_order_release);
-    }
-
-    [[nodiscard]] bool is_open() const noexcept {
-        return _open.load(std::memory_order_acquire);
-    }
-
-private:
-    std::atomic<bool> _open = true;
-};
 
 template<class E>
 concept executor = requires(E& value, std::coroutine_handle<> handle) {
