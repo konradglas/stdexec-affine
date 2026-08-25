@@ -46,6 +46,7 @@ enum class completion_status {
 template<class Awaitable, class Promise>
 struct awaitable_adapter {
     static constexpr bool customized = false;
+    static constexpr bool preserves_affinity = false;
 };
 
 template<class Promise, class = void>
@@ -388,46 +389,68 @@ public:
     }
 
     struct awaiter {
-        handle_type handle;
+        explicit awaiter(handle_type value) noexcept : _handle(value) {}
+        awaiter(awaiter&& other) noexcept
+            : _handle(std::exchange(other._handle, {})) {}
+        awaiter(const awaiter&) = delete;
+        awaiter& operator=(const awaiter&) = delete;
+        ~awaiter() {
+            if (_handle)
+                _handle.destroy();
+        }
 
         bool await_ready() const noexcept {
-            return !handle || handle.promise()._state->is_completed();
+            return !_handle || _handle.promise()._state->is_completed();
         }
 
         template<class ParentPromise>
         std::coroutine_handle<> await_suspend(
             std::coroutine_handle<ParentPromise> continuation) {
             if constexpr (requires { continuation.promise().stop_token(); }) {
-                handle.promise()._state->inherit_stop_token(
+                _handle.promise()._state->inherit_stop_token(
                     continuation.promise().stop_token());
             }
-            handle.promise()._continuation = continuation;
-            auto& executor = handle.promise()._executor;
+            _handle.promise()._continuation = continuation;
+            auto& executor = _handle.promise()._executor;
             if (executor.is_current_thread())
-                return handle;
-            if (!executor.schedule(handle))
+                return _handle;
+            if (!executor.schedule(_handle))
                 throw std::runtime_error("affine_task executor rejected continuation");
             return std::noop_coroutine();
         }
 
         T await_resume() {
-            auto owner = std::exchange(handle, {});
+            auto owner = std::exchange(_handle, {});
             auto& promise = owner.promise();
-            if (promise._state->status() == detail::completion_status::cancelled)
+            if (promise._state->status() == detail::completion_status::cancelled) {
+                owner.destroy();
                 throw detail::operation_cancelled{};
-            if (promise._state->_error)
-                std::rethrow_exception(promise._state->_error);
-            if (!promise._value)
+            }
+            if (promise._state->_error) {
+                auto error = promise._state->_error;
+                owner.destroy();
+                std::rethrow_exception(error);
+            }
+            if (!promise._value) {
+                owner.destroy();
                 throw std::logic_error("affine task completed without a value");
+            }
             T result = std::move(*promise._value);
             owner.destroy();
             return result;
         }
+
+        handle_type _handle;
     };
 
-    awaiter operator co_await() && noexcept { return {std::exchange(_handle, {})}; }
-
 private:
+    template<class Awaitable>
+    friend decltype(auto) detail::get_awaiter(Awaitable&&);
+
+    awaiter operator co_await() && noexcept {
+        return awaiter{std::exchange(_handle, {})};
+    }
+
     friend T sync_wait<T, Executor>(affine_task<T, Executor>);
 
     void destroy() noexcept {
@@ -499,39 +522,60 @@ public:
     }
 
     struct awaiter {
-        handle_type handle;
+        explicit awaiter(handle_type value) noexcept : _handle(value) {}
+        awaiter(awaiter&& other) noexcept
+            : _handle(std::exchange(other._handle, {})) {}
+        awaiter(const awaiter&) = delete;
+        awaiter& operator=(const awaiter&) = delete;
+        ~awaiter() {
+            if (_handle)
+                _handle.destroy();
+        }
+
         bool await_ready() const noexcept {
-            return !handle || handle.promise()._state->is_completed();
+            return !_handle || _handle.promise()._state->is_completed();
         }
         template<class ParentPromise>
         std::coroutine_handle<> await_suspend(
             std::coroutine_handle<ParentPromise> continuation) {
             if constexpr (requires { continuation.promise().stop_token(); }) {
-                handle.promise()._state->inherit_stop_token(
+                _handle.promise()._state->inherit_stop_token(
                     continuation.promise().stop_token());
             }
-            handle.promise()._continuation = continuation;
-            auto& executor = handle.promise()._executor;
+            _handle.promise()._continuation = continuation;
+            auto& executor = _handle.promise()._executor;
             if (executor.is_current_thread())
-                return handle;
-            if (!executor.schedule(handle))
+                return _handle;
+            if (!executor.schedule(_handle))
                 throw std::runtime_error("affine_task executor rejected continuation");
             return std::noop_coroutine();
         }
         void await_resume() {
-            auto owner = std::exchange(handle, {});
+            auto owner = std::exchange(_handle, {});
             auto& promise = owner.promise();
-            if (promise._state->status() == detail::completion_status::cancelled)
+            if (promise._state->status() == detail::completion_status::cancelled) {
+                owner.destroy();
                 throw detail::operation_cancelled{};
-            if (promise._state->_error)
-                std::rethrow_exception(promise._state->_error);
+            }
+            if (promise._state->_error) {
+                auto error = promise._state->_error;
+                owner.destroy();
+                std::rethrow_exception(error);
+            }
             owner.destroy();
         }
+
+        handle_type _handle;
     };
 
-    awaiter operator co_await() && noexcept { return {std::exchange(_handle, {})}; }
-
 private:
+    template<class Awaitable>
+    friend decltype(auto) detail::get_awaiter(Awaitable&&);
+
+    awaiter operator co_await() && noexcept {
+        return awaiter{std::exchange(_handle, {})};
+    }
+
     friend void sync_wait<Executor>(affine_task<void, Executor>);
 
     void destroy() noexcept {
@@ -576,7 +620,7 @@ struct affine_task<T, Executor>::promise_type : detail::task_promise_base<T> {
     template<class U>
     auto await_transform(affine_task<U, Executor>&& child) {
         child.inherit_stop_token(this->_state->_stop_source.get_token());
-        return std::move(child).operator co_await();
+        return detail::get_awaiter(std::move(child));
     }
 
     template<class Awaitable>
@@ -584,10 +628,15 @@ struct affine_task<T, Executor>::promise_type : detail::task_promise_base<T> {
         using adapter = detail::awaitable_adapter<
             std::remove_cvref_t<Awaitable>, promise_type>;
         if constexpr (adapter::customized) {
-            auto adapted = adapter::adapt(
-                std::forward<Awaitable>(awaitable), *this);
-            return detail::affine_awaitable<decltype(adapted), Executor>{
-                std::move(adapted), _executor};
+            if constexpr (adapter::preserves_affinity) {
+                return adapter::adapt(
+                    std::forward<Awaitable>(awaitable), *this, _executor);
+            } else {
+                auto adapted = adapter::adapt(
+                    std::forward<Awaitable>(awaitable), *this);
+                return detail::affine_awaitable<decltype(adapted), Executor>{
+                    std::move(adapted), _executor};
+            }
         } else {
             return detail::affine_awaitable<Awaitable, Executor>{
                 std::forward<Awaitable>(awaitable), _executor};
@@ -645,7 +694,7 @@ struct affine_task<void, Executor>::promise_type : detail::task_promise_base<voi
     template<class U>
     auto await_transform(affine_task<U, Executor>&& child) {
         child.inherit_stop_token(this->_state->_stop_source.get_token());
-        return std::move(child).operator co_await();
+        return detail::get_awaiter(std::move(child));
     }
 
     template<class Awaitable>
@@ -653,10 +702,15 @@ struct affine_task<void, Executor>::promise_type : detail::task_promise_base<voi
         using adapter = detail::awaitable_adapter<
             std::remove_cvref_t<Awaitable>, promise_type>;
         if constexpr (adapter::customized) {
-            auto adapted = adapter::adapt(
-                std::forward<Awaitable>(awaitable), *this);
-            return detail::affine_awaitable<decltype(adapted), Executor>{
-                std::move(adapted), _executor};
+            if constexpr (adapter::preserves_affinity) {
+                return adapter::adapt(
+                    std::forward<Awaitable>(awaitable), *this, _executor);
+            } else {
+                auto adapted = adapter::adapt(
+                    std::forward<Awaitable>(awaitable), *this);
+                return detail::affine_awaitable<decltype(adapted), Executor>{
+                    std::move(adapted), _executor};
+            }
         } else {
             return detail::affine_awaitable<Awaitable, Executor>{
                 std::forward<Awaitable>(awaitable), _executor};
