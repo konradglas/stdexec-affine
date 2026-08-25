@@ -1,7 +1,11 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
-#include <exec/affine_task.hpp>
+#include <affine/affine_task.hpp>
+
+#if defined(AFFINE_TEST_HAS_STDEXEC)
+#  include <affine/stdexec.hpp>
+#endif
 
 #include <condition_variable>
 #include <deque>
@@ -23,16 +27,16 @@ struct worker_awaitable {
 class manual_executor {
 public:
     explicit manual_executor(std::thread::id owner = std::this_thread::get_id())
-        : state_(std::make_shared<state>(owner)) {}
+        : _state(std::make_shared<state>(owner)) {}
 
     bool is_current_thread() const noexcept {
-        return std::this_thread::get_id() == state_->owner;
+        return std::this_thread::get_id() == _state->_owner;
     }
 
     bool schedule(std::coroutine_handle<> handle) {
-        std::lock_guard lock(state_->mutex);
-        state_->queue.push_back(handle);
-        state_->condition.notify_one();
+        std::lock_guard lock(_state->_mutex);
+        _state->_queue.push_back(handle);
+        _state->_condition.notify_one();
         return true;
     }
 
@@ -42,12 +46,12 @@ public:
         while (!done()) {
             std::coroutine_handle<> next;
             {
-                std::unique_lock lock(state_->mutex);
-                state_->condition.wait(lock, [&] {
-                    return !state_->queue.empty();
+                std::unique_lock lock(_state->_mutex);
+                _state->_condition.wait(lock, [&] {
+                    return !_state->_queue.empty();
                 });
-                next = state_->queue.front();
-                state_->queue.pop_front();
+                next = _state->_queue.front();
+                _state->_queue.pop_front();
             }
             next.resume();
         }
@@ -55,29 +59,29 @@ public:
 
 private:
     struct state {
-        explicit state(std::thread::id owner) : owner(owner) {}
-        std::thread::id owner;
-        std::mutex mutex;
-        std::condition_variable condition;
-        std::deque<std::coroutine_handle<>> queue;
+        explicit state(std::thread::id owner) : _owner(owner) {}
+        std::thread::id _owner;
+        std::mutex _mutex;
+        std::condition_variable _condition;
+        std::deque<std::coroutine_handle<>> _queue;
     };
-    std::shared_ptr<state> state_;
+    std::shared_ptr<state> _state;
 };
 
-exec::affine_task<int, manual_executor> answer(manual_executor executor) {
+affine::affine_task<int, manual_executor> answer(manual_executor executor) {
     co_return 42;
 }
 
-exec::affine_task<int, manual_executor> nested(manual_executor executor) {
+affine::affine_task<int, manual_executor> nested(manual_executor executor) {
     co_return co_await answer(executor);
 }
 
-exec::affine_task<void, manual_executor> mark_ran(manual_executor executor, bool& ran) {
+affine::affine_task<void, manual_executor> mark_ran(manual_executor executor, bool& ran) {
     ran = true;
     co_return;
 }
 
-exec::affine_task<int, manual_executor> arbitrary_awaitable(
+affine::affine_task<int, manual_executor> arbitrary_awaitable(
     manual_executor executor, bool& resumed_on_owner) {
     const auto value = co_await worker_awaitable{};
     resumed_on_owner = executor.is_current_thread();
@@ -86,12 +90,12 @@ exec::affine_task<int, manual_executor> arbitrary_awaitable(
 
 TEST_CASE("sync_wait drives the affine executor on its owner thread") {
     manual_executor executor;
-    CHECK(exec::sync_wait(answer(executor)) == 42);
+    CHECK(affine::sync_wait(answer(executor)) == 42);
 }
 
 TEST_CASE("nested tasks preserve executor affinity") {
     manual_executor executor;
-    CHECK(exec::sync_wait(nested(executor)) == 42);
+    CHECK(affine::sync_wait(nested(executor)) == 42);
 }
 
 TEST_CASE("task body does not run before start") {
@@ -101,7 +105,7 @@ TEST_CASE("task body does not run before start") {
     auto task = mark_ran(executor, ran);
 
     CHECK_FALSE(ran);
-    exec::sync_wait(std::move(task));
+    affine::sync_wait(std::move(task));
     CHECK(ran);
 }
 
@@ -109,6 +113,18 @@ TEST_CASE("arbitrary awaitables hop the continuation back to the executor") {
     manual_executor executor;
     bool resumed_on_owner = false;
 
-    CHECK(exec::sync_wait(arbitrary_awaitable(executor, resumed_on_owner)) == 7);
+    CHECK(affine::sync_wait(arbitrary_awaitable(executor, resumed_on_owner)) == 7);
     CHECK(resumed_on_owner);
 }
+
+#if defined(AFFINE_TEST_HAS_STDEXEC)
+affine::affine_task<int, manual_executor> sender_awaitable(
+    manual_executor executor) {
+    co_return co_await stdexec::just(99);
+}
+
+TEST_CASE("stdexec senders are adapted as affine awaitables") {
+    manual_executor executor;
+    CHECK(affine::sync_wait(sender_awaitable(executor)) == 99);
+}
+#endif
