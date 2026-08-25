@@ -3,6 +3,7 @@
 #include <condition_variable>
 #include <coroutine>
 #include <exception>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -35,22 +36,58 @@ namespace detail {
 
 struct empty_env {};
 
+enum class completion_status {
+    running,
+    succeeded,
+    failed,
+    cancelled,
+};
+
 template<class Awaitable, class Promise>
 struct awaitable_adapter {
     static constexpr bool customized = false;
+};
+
+template<class Promise, class = void>
+struct environment_adapter {
+    static empty_env make(Promise const&) noexcept { return {}; }
 };
 
 struct task_state {
     mutable std::mutex _mutex;
     std::condition_variable _completion;
     bool _completed = false;
+    completion_status _status = completion_status::running;
     std::exception_ptr _error;
     std::stop_source _stop_source;
+    std::optional<std::stop_callback<std::function<void()>>> _parent_stop_callback;
+
+    void inherit_stop_token(std::stop_token token) {
+        std::lock_guard lock(_mutex);
+        _parent_stop_callback.emplace(token, [this] {
+            _stop_source.request_stop();
+        });
+    }
 
     void complete(std::exception_ptr e = {}) noexcept {
         {
             std::lock_guard lock(_mutex);
+            if (_completed)
+                return;
             _error = std::move(e);
+            _status = _error ? completion_status::failed
+                             : completion_status::succeeded;
+            _completed = true;
+        }
+        _completion.notify_all();
+    }
+
+    void cancel() noexcept {
+        {
+            std::lock_guard lock(_mutex);
+            if (_completed)
+                return;
+            _status = completion_status::cancelled;
             _completed = true;
         }
         _completion.notify_all();
@@ -60,6 +97,17 @@ struct task_state {
         std::lock_guard lock(_mutex);
         return _completed;
     }
+
+    completion_status status() const noexcept {
+        std::lock_guard lock(_mutex);
+        return _status;
+    }
+};
+
+class operation_cancelled : public std::runtime_error {
+public:
+    operation_cancelled()
+        : std::runtime_error("affine operation was cancelled") {}
 };
 
 struct stop_token_awaitable {
@@ -81,6 +129,10 @@ struct result_storage<void> {};
 template<class T>
 struct task_promise_base : result_storage<T> {
     std::shared_ptr<task_state> _state = std::make_shared<task_state>();
+
+    [[nodiscard]] std::stop_token stop_token() const noexcept {
+        return _state->_stop_source.get_token();
+    }
 
     void unhandled_exception() noexcept {
         _state->complete(std::current_exception());
@@ -253,6 +305,8 @@ private:
 
 } // namespace detail
 
+using operation_cancelled = detail::operation_cancelled;
+
 /**
  * A coroutine task whose execution and continuations are affine to Executor.
  *
@@ -310,6 +364,11 @@ public:
         return _handle && _handle.promise()._state->_stop_source.request_stop();
     }
 
+    void inherit_stop_token(std::stop_token token) {
+        if (_handle)
+            _handle.promise()._state->inherit_stop_token(token);
+    }
+
     [[nodiscard]] Executor& executor() {
         if (!_handle)
             throw std::logic_error("affine_task has no executor");
@@ -335,7 +394,13 @@ public:
             return !handle || handle.promise()._state->is_completed();
         }
 
-        std::coroutine_handle<> await_suspend(std::coroutine_handle<> continuation) {
+        template<class ParentPromise>
+        std::coroutine_handle<> await_suspend(
+            std::coroutine_handle<ParentPromise> continuation) {
+            if constexpr (requires { continuation.promise().stop_token(); }) {
+                handle.promise()._state->inherit_stop_token(
+                    continuation.promise().stop_token());
+            }
             handle.promise()._continuation = continuation;
             auto& executor = handle.promise()._executor;
             if (executor.is_current_thread())
@@ -348,8 +413,12 @@ public:
         T await_resume() {
             auto owner = std::exchange(handle, {});
             auto& promise = owner.promise();
+            if (promise._state->status() == detail::completion_status::cancelled)
+                throw detail::operation_cancelled{};
             if (promise._state->_error)
                 std::rethrow_exception(promise._state->_error);
+            if (!promise._value)
+                throw std::logic_error("affine task completed without a value");
             T result = std::move(*promise._value);
             owner.destroy();
             return result;
@@ -407,6 +476,11 @@ public:
         return _handle && _handle.promise()._state->_stop_source.request_stop();
     }
 
+    void inherit_stop_token(std::stop_token token) {
+        if (_handle)
+            _handle.promise()._state->inherit_stop_token(token);
+    }
+
     [[nodiscard]] Executor& executor() {
         if (!_handle)
             throw std::logic_error("affine_task has no executor");
@@ -429,7 +503,13 @@ public:
         bool await_ready() const noexcept {
             return !handle || handle.promise()._state->is_completed();
         }
-        std::coroutine_handle<> await_suspend(std::coroutine_handle<> continuation) {
+        template<class ParentPromise>
+        std::coroutine_handle<> await_suspend(
+            std::coroutine_handle<ParentPromise> continuation) {
+            if constexpr (requires { continuation.promise().stop_token(); }) {
+                handle.promise()._state->inherit_stop_token(
+                    continuation.promise().stop_token());
+            }
             handle.promise()._continuation = continuation;
             auto& executor = handle.promise()._executor;
             if (executor.is_current_thread())
@@ -441,6 +521,8 @@ public:
         void await_resume() {
             auto owner = std::exchange(handle, {});
             auto& promise = owner.promise();
+            if (promise._state->status() == detail::completion_status::cancelled)
+                throw detail::operation_cancelled{};
             if (promise._state->_error)
                 std::rethrow_exception(promise._state->_error);
             owner.destroy();
@@ -491,6 +573,12 @@ struct affine_task<T, Executor>::promise_type : detail::task_promise_base<T> {
     };
 
     final_awaiter final_suspend() const noexcept { return {}; }
+    template<class U>
+    auto await_transform(affine_task<U, Executor>&& child) {
+        child.inherit_stop_token(this->_state->_stop_source.get_token());
+        return std::move(child).operator co_await();
+    }
+
     template<class Awaitable>
     auto await_transform(Awaitable&& awaitable) {
         using adapter = detail::awaitable_adapter<
@@ -511,9 +599,11 @@ struct affine_task<T, Executor>::promise_type : detail::task_promise_base<T> {
             this->_state->_stop_source.get_token()};
     }
 
-    detail::empty_env get_env() const noexcept { return {}; }
+    auto get_env() const noexcept {
+        return detail::environment_adapter<promise_type>::make(*this);
+    }
     std::coroutine_handle<> unhandled_stopped() noexcept {
-        this->_state->complete();
+        this->_state->cancel();
         return _continuation ? _continuation : std::noop_coroutine();
     }
     template<class U> void return_value(U&& value) {
@@ -552,6 +642,12 @@ struct affine_task<void, Executor>::promise_type : detail::task_promise_base<voi
     };
 
     final_awaiter final_suspend() const noexcept { return {}; }
+    template<class U>
+    auto await_transform(affine_task<U, Executor>&& child) {
+        child.inherit_stop_token(this->_state->_stop_source.get_token());
+        return std::move(child).operator co_await();
+    }
+
     template<class Awaitable>
     auto await_transform(Awaitable&& awaitable) {
         using adapter = detail::awaitable_adapter<
@@ -572,9 +668,11 @@ struct affine_task<void, Executor>::promise_type : detail::task_promise_base<voi
             this->_state->_stop_source.get_token()};
     }
 
-    detail::empty_env get_env() const noexcept { return {}; }
+    auto get_env() const noexcept {
+        return detail::environment_adapter<promise_type>::make(*this);
+    }
     std::coroutine_handle<> unhandled_stopped() noexcept {
-        this->_state->complete();
+        this->_state->cancel();
         return _continuation ? _continuation : std::noop_coroutine();
     }
     void return_void() const noexcept {}
@@ -592,6 +690,8 @@ T sync_wait(affine_task<T, Executor> task) {
     task.start();
     executor.run_until([&] { return state->is_completed(); });
 
+    if (state->status() == detail::completion_status::cancelled)
+        throw operation_cancelled{};
     if (state->_error)
         std::rethrow_exception(state->_error);
 
@@ -610,6 +710,8 @@ void sync_wait(affine_task<void, Executor> task) {
     auto& executor = task.executor();
     task.start();
     executor.run_until([&] { return state->is_completed(); });
+    if (state->status() == detail::completion_status::cancelled)
+        throw operation_cancelled{};
     if (state->_error)
         std::rethrow_exception(state->_error);
 }
