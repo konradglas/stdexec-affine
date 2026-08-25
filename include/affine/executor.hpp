@@ -16,4 +16,9 @@ concept sync_executor = executor<E> && requires(E& value) {
     value.run_until([] { return true; });
 };
 
+template<class E>
+concept drainable_executor = executor<E> && requires(E& value) {
+    value.drain();
+};
+
 } // namespace affine

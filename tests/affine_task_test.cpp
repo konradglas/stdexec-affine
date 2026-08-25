@@ -126,6 +126,13 @@ affine::affine_task<void, Executor> observe_stop(
     co_return;
 }
 
+template<class Executor>
+affine::affine_task<void, Executor> observe_nested_stop(
+    Executor executor, bool& observed) {
+    co_await observe_stop(executor, observed);
+    co_return;
+}
+
 affine::affine_task<int, manual_executor> arbitrary_awaitable(
     manual_executor executor, bool& resumed_on_owner) {
     const auto value = co_await worker_awaitable{};
@@ -161,6 +168,16 @@ TEST_CASE("tasks expose cooperative cancellation through their context") {
 
     CHECK(task.request_stop());
     CHECK_FALSE(task.request_stop());
+    affine::sync_wait(std::move(task));
+    CHECK(observed);
+}
+
+TEST_CASE("nested tasks inherit cooperative cancellation") {
+    manual_executor executor;
+    bool observed = false;
+    auto task = observe_nested_stop(executor, observed);
+
+    CHECK(task.request_stop());
     affine::sync_wait(std::move(task));
     CHECK(observed);
 }
@@ -208,14 +225,61 @@ TEST_CASE("closing main thread executor makes queued callbacks harmless") {
     CHECK_FALSE(executor.accepting());
 }
 
+TEST_CASE("main thread executor drains claimed callbacks on its owner thread") {
+    host_queue host;
+    affine::main_thread_executor executor(
+        std::this_thread::get_id(),
+        [&](std::function<void()> callback) { host.enqueue(std::move(callback)); });
+
+    bool ran = false;
+    auto task = mark_ran(executor, ran);
+    std::thread worker([&] { task.start(); });
+    worker.join();
+
+    executor.close();
+    executor.drain();
+
+    CHECK(ran);
+    CHECK(task.done());
+}
+
 #if defined(AFFINE_TEST_HAS_STDEXEC)
 affine::affine_task<int, manual_executor> sender_awaitable(
     manual_executor executor) {
     co_return co_await stdexec::just(99);
 }
 
+affine::affine_task<void, manual_executor> observe_stdexec_stop(
+    manual_executor executor, bool& observed) {
+    const auto token = co_await stdexec::read_env(stdexec::get_stop_token);
+    observed = token.stop_requested();
+    co_return;
+}
+
+affine::affine_task<void, manual_executor> stopped_sender(
+    manual_executor executor) {
+    co_return co_await stdexec::just_stopped();
+}
+
 TEST_CASE("stdexec senders are adapted as affine awaitables") {
     manual_executor executor;
     CHECK(affine::sync_wait(sender_awaitable(executor)) == 99);
+}
+
+TEST_CASE("stdexec sender environment exposes the task stop token") {
+    manual_executor executor;
+    bool observed = false;
+    auto task = observe_stdexec_stop(executor, observed);
+
+    CHECK(task.request_stop());
+    affine::sync_wait(std::move(task));
+    CHECK(observed);
+}
+
+TEST_CASE("unwrapped stdexec stop becomes task cancellation") {
+    manual_executor executor;
+    CHECK_THROWS_AS(
+        affine::sync_wait(stopped_sender(executor)),
+        affine::operation_cancelled);
 }
 #endif

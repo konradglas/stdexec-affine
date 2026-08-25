@@ -29,7 +29,10 @@ For stdexec sender adaptation, include the optional integration header instead:
 The executor concepts are available independently through
 `<affine/executor.hpp>`. The host-facing main-thread adapter is opt-in through
 `<affine/main_thread_executor.hpp>` and takes host `dispatch` and optional
-event-pump callbacks.
+event-pump callbacks. Executors that own a ready queue may additionally model
+`affine::drainable_executor`; `main_thread_executor::drain()` must be called on
+its owner thread before task frames are destroyed when claimed callbacks need
+to be completed.
 
 Tasks support cooperative cancellation through their context:
 
@@ -43,7 +46,10 @@ affine::affine_task<void, Executor> work(Executor executor) {
 ```
 
 Call `task.request_stop()` to request cancellation. Awaitables are not forced
-to stop and must opt in by observing the token.
+to stop and must opt in by observing the token. If an operation completes with
+stop, `sync_wait()` throws `affine::operation_cancelled`; use stdexec's
+`stopped_as_optional` when cancellation should become a value such as
+`std::nullopt` instead.
 
 This project is based on the execution model used by stdexec and is designed
 to interoperate with sender/receiver executors, but it does not currently
