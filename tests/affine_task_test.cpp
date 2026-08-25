@@ -129,6 +129,14 @@ affine::affine_task<int, manual_executor> nested(manual_executor executor) {
     co_return co_await answer(executor);
 }
 
+affine::affine_task<int, manual_executor> default_executor_child() {
+    co_return 42;
+}
+
+affine::affine_task<int, manual_executor> default_executor_parent() {
+    co_return co_await default_executor_child();
+}
+
 template<class Executor>
 affine::affine_task<void, Executor> mark_ran(Executor executor, bool& ran) {
     ran = true;
@@ -157,8 +165,9 @@ affine::affine_task<int, manual_executor> arbitrary_awaitable(
     co_return value;
 }
 
-affine::affine_task<void, manual_executor> scoped_arbitrary_awaitable(
-    manual_executor executor, bool& resumed_on_owner) {
+template<class Executor>
+affine::affine_task<void, Executor> scoped_arbitrary_awaitable(
+    Executor executor, bool& resumed_on_owner) {
     (void)co_await worker_awaitable{};
     resumed_on_owner = executor.is_current_thread();
 }
@@ -171,6 +180,10 @@ TEST_CASE("sync_wait drives the affine executor on its owner thread") {
 TEST_CASE("nested tasks preserve executor affinity") {
     manual_executor executor;
     CHECK(affine::sync_wait(nested(executor)) == 42);
+}
+
+TEST_CASE("nested tasks inherit a default-constructed parent executor") {
+    CHECK(affine::sync_wait(default_executor_parent()) == 42);
 }
 
 TEST_CASE("task body does not run before start") {
@@ -223,6 +236,59 @@ TEST_CASE("root scope owns an active task until drain completes") {
     scope.drain();
 
     CHECK(resumed_on_owner);
+}
+
+TEST_CASE("child shutdown drains while the executor remains open") {
+    host_queue host;
+    affine::main_thread_executor executor(
+        std::this_thread::get_id(),
+        [&](std::function<void()> callback) { host.enqueue(std::move(callback)); });
+
+    bool parent_resumed = false;
+    bool child_resumed = false;
+    auto root = affine::create_root_scope();
+    auto parent = affine::spawn(
+        scoped_arbitrary_awaitable(executor, parent_resumed), root);
+    auto child = affine::spawn(
+        scoped_arbitrary_awaitable(executor, child_resumed), parent);
+
+    parent.shutdown_and_wait();
+
+    CHECK(parent.completed());
+    CHECK(child.completed());
+    CHECK(parent_resumed);
+    CHECK(child_resumed);
+    CHECK(executor.accepting());
+
+    root.shutdown_and_wait();
+    host.pump_until([&] { return host.empty(); });
+}
+
+TEST_CASE("worker-thread waits block without draining the owner executor") {
+    host_queue host;
+    affine::main_thread_executor executor(
+        std::this_thread::get_id(),
+        [&](std::function<void()> callback) { host.enqueue(std::move(callback)); });
+
+    bool resumed_on_owner = false;
+    auto root = affine::create_root_scope();
+    auto child = affine::spawn(
+        scoped_arbitrary_awaitable(executor, resumed_on_owner), root);
+
+    std::atomic<bool> wait_returned = false;
+    std::thread waiter([&] {
+        child.wait();
+        wait_returned.store(true, std::memory_order_release);
+    });
+
+    host.pump_until([&] { return child.completed(); });
+    waiter.join();
+
+    CHECK(wait_returned.load(std::memory_order_acquire));
+    CHECK(resumed_on_owner);
+    CHECK(executor.accepting());
+
+    root.shutdown_and_wait();
 }
 
 TEST_CASE("main thread executor bridges a host dispatch queue") {

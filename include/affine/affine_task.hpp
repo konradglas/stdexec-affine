@@ -99,6 +99,11 @@ struct task_state {
         return _completed;
     }
 
+    void wait() {
+        std::unique_lock lock(_mutex);
+        _completion.wait(lock, [this] { return _completed; });
+    }
+
     completion_status status() const noexcept {
         std::lock_guard lock(_mutex);
         return _status;
@@ -373,6 +378,11 @@ public:
             _handle.promise()._state->inherit_stop_token(token);
     }
 
+    void bind_executor(Executor executor) {
+        if (_handle)
+            _handle.promise()._executor = std::move(executor);
+    }
+
     [[nodiscard]] Executor& executor() {
         if (!_handle)
             throw std::logic_error("affine_task has no executor");
@@ -507,6 +517,11 @@ public:
             _handle.promise()._state->inherit_stop_token(token);
     }
 
+    void bind_executor(Executor executor) {
+        if (_handle)
+            _handle.promise()._executor = std::move(executor);
+    }
+
     [[nodiscard]] Executor& executor() {
         if (!_handle)
             throw std::logic_error("affine_task has no executor");
@@ -594,9 +609,17 @@ struct affine_task<T, Executor>::promise_type : detail::task_promise_base<T> {
     Executor _executor;
     std::coroutine_handle<> _continuation{};
 
+    promise_type() requires std::default_initializable<Executor> = default;
+
     template<class... Args>
     explicit promise_type(Executor executor, Args&&...)
         : _executor(std::move(executor)) {}
+
+    template<class First, class... Rest>
+        requires (!std::same_as<std::remove_cvref_t<First>, Executor>
+                  && std::default_initializable<Executor>)
+    explicit promise_type(First&&, Rest&&...)
+        : _executor() {}
 
     affine_task get_return_object() noexcept {
         return affine_task{handle_type::from_promise(*this)};
@@ -622,6 +645,7 @@ struct affine_task<T, Executor>::promise_type : detail::task_promise_base<T> {
     final_awaiter final_suspend() const noexcept { return {}; }
     template<class U>
     auto await_transform(affine_task<U, Executor>&& child) {
+        child.bind_executor(_executor);
         child.inherit_stop_token(this->_state->_stop_source.get_token());
         return detail::get_awaiter(std::move(child));
     }
@@ -668,9 +692,17 @@ struct affine_task<void, Executor>::promise_type : detail::task_promise_base<voi
     Executor _executor;
     std::coroutine_handle<> _continuation{};
 
+    promise_type() requires std::default_initializable<Executor> = default;
+
     template<class... Args>
     explicit promise_type(Executor executor, Args&&...)
         : _executor(std::move(executor)) {}
+
+    template<class First, class... Rest>
+        requires (!std::same_as<std::remove_cvref_t<First>, Executor>
+                  && std::default_initializable<Executor>)
+    explicit promise_type(First&&, Rest&&...)
+        : _executor() {}
 
     affine_task get_return_object() noexcept {
         return affine_task{handle_type::from_promise(*this)};
@@ -696,6 +728,7 @@ struct affine_task<void, Executor>::promise_type : detail::task_promise_base<voi
     final_awaiter final_suspend() const noexcept { return {}; }
     template<class U>
     auto await_transform(affine_task<U, Executor>&& child) {
+        child.bind_executor(_executor);
         child.inherit_stop_token(this->_state->_stop_source.get_token());
         return detail::get_awaiter(std::move(child));
     }

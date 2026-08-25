@@ -2,6 +2,7 @@
 
 #include <affine/executor.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <functional>
@@ -54,6 +55,7 @@ public:
             dispatch = _state->_dispatch;
             _state->_pending.push_back(record);
         }
+        _state->_condition.notify_all();
 
         if (!dispatch) {
             remove_pending(record);
@@ -62,8 +64,10 @@ public:
 
         auto state = _state;
         dispatch([state = std::move(state), record = std::move(record)] {
-            if (record->claim())
+            if (record->claim()) {
+                state->remove_pending(record);
                 record->_callback();
+            }
         });
         return true;
     }
@@ -73,14 +77,9 @@ public:
             throw std::logic_error("main_thread_executor must drain on its owner thread");
 
         for (;;) {
-            std::shared_ptr<callback_record> record;
-            {
-                std::lock_guard lock(_state->_mutex);
-                if (_state->_ready.empty())
-                    return;
-                record = std::move(_state->_ready.back());
-                _state->_ready.pop_back();
-            }
+            auto record = _state->take_next();
+            if (!record)
+                return;
             record->_callback();
         }
     }
@@ -89,20 +88,18 @@ public:
     void run_until(Predicate&& done) {
         if (!is_current_thread())
             throw std::logic_error("main_thread_executor must be pumped on its owner thread");
-        if (_state->_accepting.load(std::memory_order_acquire) && !_state->_pump)
-            throw std::logic_error("main_thread_executor has no host event pump");
         std::function<bool()> done_function = std::forward<Predicate>(done);
         std::function<bool()> predicate = [this, &done_function] {
-            return done_function() || _state->has_ready();
+            return done_function() || _state->has_work();
         };
         while (!done_function()) {
             drain();
             if (done_function())
                 return;
-            if (_state->_accepting.load(std::memory_order_acquire)) {
+            if (_state->_accepting.load(std::memory_order_acquire) && _state->_pump) {
                 _state->_pump(predicate);
             } else {
-                _state->wait_until_ready(done_function);
+                _state->wait_until_work(done_function);
             }
         }
     }
@@ -155,22 +152,53 @@ private:
         std::vector<std::shared_ptr<callback_record>> _pending;
         std::vector<std::shared_ptr<callback_record>> _ready;
 
-        bool has_ready() const {
+        bool has_work() const {
             std::lock_guard lock(_mutex);
-            return !_ready.empty();
+            if (!_ready.empty())
+                return true;
+            return std::ranges::any_of(_pending, [](const auto& record) {
+                return record && !record->_claimed.load(std::memory_order_acquire);
+            });
         }
 
-        void wait_until_ready(const std::function<bool()>& done) {
+        void wait_until_work(const std::function<bool()>& done) {
             std::unique_lock lock(_mutex);
-            _condition.wait(lock, [&] { return done() || !_ready.empty(); });
+            _condition.wait(lock, [&] {
+                if (done() || !_ready.empty())
+                    return true;
+                return std::ranges::any_of(_pending, [](const auto& record) {
+                    return record && !record->_claimed.load(std::memory_order_acquire);
+                });
+            });
+        }
+
+        std::shared_ptr<callback_record> take_next() {
+            std::lock_guard lock(_mutex);
+            if (!_ready.empty()) {
+                auto record = std::move(_ready.back());
+                _ready.pop_back();
+                return record;
+            }
+
+            while (!_pending.empty()) {
+                auto record = std::move(_pending.back());
+                _pending.pop_back();
+                if (record && record->claim())
+                    return record;
+            }
+            return {};
+        }
+
+        void remove_pending(const std::shared_ptr<callback_record>& record) {
+            std::lock_guard lock(_mutex);
+            std::erase(_pending, record);
         }
     };
 
     std::shared_ptr<state> _state;
 
     void remove_pending(const std::shared_ptr<callback_record>& record) {
-        std::lock_guard lock(_state->_mutex);
-        std::erase(_state->_pending, record);
+        _state->remove_pending(record);
     }
 };
 

@@ -38,8 +38,9 @@ executor.run_until(predicate);
 ```
 
 `drain()` executes work already claimed for local execution. `run_until()`
-keeps draining—and, during normal operation, may cooperatively pump a host
-queue—until the predicate is true.
+may also claim callbacks already submitted to the host, then keeps draining
+until the predicate is true. This works while the executor remains open and
+does not require direct access to the host queue.
 
 The generic task type is:
 
@@ -48,6 +49,10 @@ The generic task type is:
 
 affine::affine_task<T, Executor>
 ```
+
+The executor can be supplied as the coroutine's first argument. If `Executor`
+is default-constructible, it may be omitted; structurally awaited affine tasks
+are rebound to their parent's executor.
 
 The optional stdexec integration adapts senders and `exec::task` while
 preserving executor affinity:
@@ -64,7 +69,10 @@ Detached roots are owned explicitly by a root scope:
 #include <affine/root_scope.hpp>
 
 auto root_scope = affine::create_root_scope();
-affine::spawn(root_task(executor), root_scope);
+auto loading = affine::spawn(root_task(executor), root_scope);
+
+// Cancel and synchronously finish one subtree while the executor stays open:
+loading.shutdown_and_wait();
 
 // On the executor's owner thread during teardown:
 root_scope.close();
@@ -79,6 +87,12 @@ placed directly into its local ready queue.
 `drain()` keeps every structurally owned coroutine frame alive and drives the
 executor until all roots have completed. Only then are the frames destroyed.
 This is why waiting on the executor thread does not deadlock.
+
+Every `spawn()` returns an `affine::task_handle`. `close()` requests
+cancellation for that task and its detached descendants and returns
+immediately. `shutdown_and_wait()` additionally waits for the subtree: on the
+executor thread it calls `run_until()`, while other threads block on the task's
+completion condition variable. A child wait never closes the executor.
 
 After shutdown begins, an in-flight operation must eventually complete without
 requiring another external host message-loop event. Cancellation is
