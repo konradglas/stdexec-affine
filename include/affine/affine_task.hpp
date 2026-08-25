@@ -7,8 +7,11 @@
 #include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <stop_token>
 #include <type_traits>
 #include <utility>
+
+#include <affine/executor.hpp>
 
 namespace affine {
 
@@ -20,6 +23,13 @@ T sync_wait(affine_task<T, Executor> task);
 
 template<class Executor>
 void sync_wait(affine_task<void, Executor> task);
+
+namespace this_task {
+
+struct stop_token_t {};
+inline constexpr stop_token_t stop_token{};
+
+} // namespace this_task
 
 namespace detail {
 
@@ -35,6 +45,7 @@ struct task_state {
     std::condition_variable _completion;
     bool _completed = false;
     std::exception_ptr _error;
+    std::stop_source _stop_source;
 
     void complete(std::exception_ptr e = {}) noexcept {
         {
@@ -49,6 +60,14 @@ struct task_state {
         std::lock_guard lock(_mutex);
         return _completed;
     }
+};
+
+struct stop_token_awaitable {
+    std::stop_token _token;
+
+    bool await_ready() const noexcept { return true; }
+    void await_suspend(std::coroutine_handle<>) const noexcept {}
+    std::stop_token await_resume() const noexcept { return _token; }
 };
 
 template<class T>
@@ -282,6 +301,15 @@ public:
         return _handle ? _handle.promise()._state : nullptr;
     }
 
+    [[nodiscard]] std::stop_token stop_token() const noexcept {
+        return _handle ? _handle.promise()._state->_stop_source.get_token()
+                       : std::stop_token{};
+    }
+
+    bool request_stop() noexcept {
+        return _handle && _handle.promise()._state->_stop_source.request_stop();
+    }
+
     [[nodiscard]] Executor& executor() {
         if (!_handle)
             throw std::logic_error("affine_task has no executor");
@@ -368,6 +396,15 @@ public:
     }
     [[nodiscard]] std::shared_ptr<detail::task_state> state() const noexcept {
         return _handle ? _handle.promise()._state : nullptr;
+    }
+
+    [[nodiscard]] std::stop_token stop_token() const noexcept {
+        return _handle ? _handle.promise()._state->_stop_source.get_token()
+                       : std::stop_token{};
+    }
+
+    bool request_stop() noexcept {
+        return _handle && _handle.promise()._state->_stop_source.request_stop();
     }
 
     [[nodiscard]] Executor& executor() {
@@ -469,6 +506,11 @@ struct affine_task<T, Executor>::promise_type : detail::task_promise_base<T> {
         }
     }
 
+    auto await_transform(this_task::stop_token_t const&) noexcept {
+        return detail::stop_token_awaitable{
+            this->_state->_stop_source.get_token()};
+    }
+
     detail::empty_env get_env() const noexcept { return {}; }
     std::coroutine_handle<> unhandled_stopped() noexcept {
         this->_state->complete();
@@ -525,6 +567,11 @@ struct affine_task<void, Executor>::promise_type : detail::task_promise_base<voi
         }
     }
 
+    auto await_transform(this_task::stop_token_t const&) noexcept {
+        return detail::stop_token_awaitable{
+            this->_state->_stop_source.get_token()};
+    }
+
     detail::empty_env get_env() const noexcept { return {}; }
     std::coroutine_handle<> unhandled_stopped() noexcept {
         this->_state->complete();
@@ -535,6 +582,8 @@ struct affine_task<void, Executor>::promise_type : detail::task_promise_base<voi
 
 template<class T, class Executor>
 T sync_wait(affine_task<T, Executor> task) {
+    static_assert(sync_executor<Executor>,
+                  "Executor must provide run_until(Predicate) for sync_wait");
     auto state = task.state();
     if (!state)
         throw std::invalid_argument("sync_wait requires a valid affine_task");
@@ -553,6 +602,8 @@ T sync_wait(affine_task<T, Executor> task) {
 
 template<class Executor>
 void sync_wait(affine_task<void, Executor> task) {
+    static_assert(sync_executor<Executor>,
+                  "Executor must provide run_until(Predicate) for sync_wait");
     auto state = task.state();
     if (!state)
         throw std::invalid_argument("sync_wait requires a valid affine_task");

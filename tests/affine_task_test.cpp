@@ -2,6 +2,7 @@
 #include <doctest/doctest.h>
 
 #include <affine/affine_task.hpp>
+#include <affine/main_thread_executor.hpp>
 
 #if defined(AFFINE_TEST_HAS_STDEXEC)
 #  include <affine/stdexec.hpp>
@@ -11,6 +12,41 @@
 #include <deque>
 #include <memory>
 #include <thread>
+
+class host_queue {
+public:
+    void enqueue(std::function<void()> callback) {
+        {
+            std::lock_guard lock(_mutex);
+            _queue.push_back(std::move(callback));
+        }
+        _condition.notify_one();
+    }
+
+    template<class Predicate>
+    void pump_until(Predicate&& done) {
+        while (!done()) {
+            std::function<void()> callback;
+            {
+                std::unique_lock lock(_mutex);
+                _condition.wait(lock, [&] { return !_queue.empty(); });
+                callback = std::move(_queue.front());
+                _queue.pop_front();
+            }
+            callback();
+        }
+    }
+
+    bool empty() const {
+        std::lock_guard lock(_mutex);
+        return _queue.empty();
+    }
+
+private:
+    mutable std::mutex _mutex;
+    std::condition_variable _condition;
+    std::deque<std::function<void()>> _queue;
+};
 
 struct worker_awaitable {
     bool await_ready() const noexcept { return false; }
@@ -76,8 +112,17 @@ affine::affine_task<int, manual_executor> nested(manual_executor executor) {
     co_return co_await answer(executor);
 }
 
-affine::affine_task<void, manual_executor> mark_ran(manual_executor executor, bool& ran) {
+template<class Executor>
+affine::affine_task<void, Executor> mark_ran(Executor executor, bool& ran) {
     ran = true;
+    co_return;
+}
+
+template<class Executor>
+affine::affine_task<void, Executor> observe_stop(
+    Executor executor, bool& observed) {
+    const auto token = co_await affine::this_task::stop_token;
+    observed = token.stop_requested();
     co_return;
 }
 
@@ -109,12 +154,58 @@ TEST_CASE("task body does not run before start") {
     CHECK(ran);
 }
 
+TEST_CASE("tasks expose cooperative cancellation through their context") {
+    manual_executor executor;
+    bool observed = false;
+    auto task = observe_stop(executor, observed);
+
+    CHECK(task.request_stop());
+    CHECK_FALSE(task.request_stop());
+    affine::sync_wait(std::move(task));
+    CHECK(observed);
+}
+
 TEST_CASE("arbitrary awaitables hop the continuation back to the executor") {
     manual_executor executor;
     bool resumed_on_owner = false;
 
     CHECK(affine::sync_wait(arbitrary_awaitable(executor, resumed_on_owner)) == 7);
     CHECK(resumed_on_owner);
+}
+
+TEST_CASE("main thread executor bridges a host dispatch queue") {
+    host_queue host;
+    affine::main_thread_executor executor(
+        std::this_thread::get_id(),
+        [&](std::function<void()> callback) { host.enqueue(std::move(callback)); },
+        [&](std::function<bool()> done) { host.pump_until(std::move(done)); });
+
+    bool ran = false;
+    auto task = mark_ran(executor, ran);
+    std::thread worker([&] { task.start(); });
+
+    executor.run_until([&] { return task.done(); });
+    worker.join();
+    CHECK(ran);
+}
+
+TEST_CASE("closing main thread executor makes queued callbacks harmless") {
+    host_queue host;
+    affine::main_thread_executor executor(
+        std::this_thread::get_id(),
+        [&](std::function<void()> callback) { host.enqueue(std::move(callback)); });
+
+    bool ran = false;
+    {
+        auto task = mark_ran(executor, ran);
+        std::thread worker([&] { task.start(); });
+        worker.join();
+        executor.close();
+    }
+
+    host.pump_until([&] { return host.empty(); });
+    CHECK_FALSE(ran);
+    CHECK_FALSE(executor.accepting());
 }
 
 #if defined(AFFINE_TEST_HAS_STDEXEC)
