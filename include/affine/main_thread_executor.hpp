@@ -40,6 +40,16 @@ public:
         return schedule_callback([handle] { handle.resume(); });
     }
 
+    bool schedule(std::coroutine_handle<> handle,
+                  std::shared_ptr<callback_lifetime> lifetime) {
+        std::weak_ptr<callback_lifetime> weak_lifetime = std::move(lifetime);
+        return schedule_callback([handle, weak_lifetime] {
+            if (const auto lifetime = weak_lifetime.lock();
+                lifetime && lifetime->is_open())
+                handle.resume();
+        });
+    }
+
     bool schedule_callback(std::function<void()> callback) {
         dispatch_function dispatch;
         auto record = std::make_shared<callback_record>(std::move(callback));

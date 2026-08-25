@@ -60,7 +60,17 @@ struct task_state {
     completion_status _status = completion_status::running;
     std::exception_ptr _error;
     std::stop_source _stop_source;
+    std::shared_ptr<callback_lifetime> _lifetime =
+        std::make_shared<callback_lifetime>();
     std::optional<std::stop_callback<std::function<void()>>> _parent_stop_callback;
+
+    ~task_state() {
+        _lifetime->close();
+    }
+
+    void close() noexcept {
+        _lifetime->close();
+    }
 
     void inherit_stop_token(std::stop_token token) {
         std::lock_guard lock(_mutex);
@@ -134,6 +144,10 @@ struct task_promise_base : result_storage<T> {
         return _state->_stop_source.get_token();
     }
 
+    [[nodiscard]] std::shared_ptr<callback_lifetime> lifetime() const noexcept {
+        return _state->_lifetime;
+    }
+
     void unhandled_exception() noexcept {
         _state->complete(std::current_exception());
     }
@@ -190,6 +204,16 @@ private:
 };
 
 template<class Executor>
+bool schedule(Executor& executor,
+              std::coroutine_handle<> handle,
+              const std::shared_ptr<callback_lifetime>& lifetime) {
+    if constexpr (requires { executor.schedule(handle, lifetime); })
+        return executor.schedule(handle, lifetime);
+    else
+        return executor.schedule(handle);
+}
+
+template<class Executor>
 struct continuation_bridge {
     struct promise_type;
     using handle_type = std::coroutine_handle<promise_type>;
@@ -223,9 +247,14 @@ template<class Executor>
 struct continuation_bridge<Executor>::promise_type {
     Executor _executor;
     std::coroutine_handle<> _continuation{};
+    std::shared_ptr<callback_lifetime> _lifetime;
 
-    promise_type(Executor executor, std::coroutine_handle<> continuation)
-        : _executor(std::move(executor)), _continuation(continuation) {}
+    promise_type(Executor executor,
+                 std::coroutine_handle<> continuation,
+                 std::shared_ptr<callback_lifetime> lifetime)
+        : _executor(std::move(executor)),
+          _continuation(continuation),
+          _lifetime(std::move(lifetime)) {}
 
     continuation_bridge get_return_object() noexcept {
         return continuation_bridge{handle_type::from_promise(*this)};
@@ -242,7 +271,8 @@ struct continuation_bridge<Executor>::promise_type {
                 return std::noop_coroutine();
             if (promise._executor.is_current_thread())
                 return promise._continuation;
-            if (!promise._executor.schedule(promise._continuation))
+            if (!detail::schedule(
+                    promise._executor, promise._continuation, promise._lifetime))
                 std::terminate();
             return std::noop_coroutine();
         }
@@ -254,7 +284,9 @@ struct continuation_bridge<Executor>::promise_type {
 
 template<class Executor>
 continuation_bridge<Executor> make_continuation_bridge(
-    Executor executor, std::coroutine_handle<> continuation) {
+    Executor executor,
+    std::coroutine_handle<> continuation,
+    std::shared_ptr<callback_lifetime> lifetime) {
     co_return;
 }
 
@@ -266,17 +298,21 @@ class affine_awaitable {
     using bridge_type = continuation_bridge<Executor>;
 
 public:
-    affine_awaitable(Awaitable&& awaitable, Executor executor)
+    affine_awaitable(Awaitable&& awaitable,
+                     Executor executor,
+                     std::shared_ptr<callback_lifetime> lifetime)
         : _awaitable(std::forward<Awaitable>(awaitable)),
           _awaiter(get_awaiter(std::move(_awaitable).get())),
-          _executor(std::move(executor)) {}
+          _executor(std::move(executor)),
+          _lifetime(std::move(lifetime)) {}
 
     bool await_ready() noexcept(noexcept(_awaiter.await_ready())) {
         return _awaiter.await_ready();
     }
 
     auto await_suspend(std::coroutine_handle<> continuation) {
-        _bridge.emplace(make_continuation_bridge(_executor, continuation));
+        _bridge.emplace(make_continuation_bridge(
+            _executor, continuation, _lifetime));
         auto bridge_handle = _bridge->handle();
 
         using result_type = decltype(_awaiter.await_suspend(bridge_handle));
@@ -300,6 +336,7 @@ private:
     storage_type _awaitable;
     awaiter_type _awaiter;
     Executor _executor;
+    std::shared_ptr<callback_lifetime> _lifetime;
     std::optional<bridge_type> _bridge;
 };
 
@@ -383,7 +420,8 @@ public:
         auto& executor = handle.promise()._executor;
         if (executor.is_current_thread())
             handle.resume();
-        else if (!executor.schedule(handle))
+        else if (!detail::schedule(
+                     executor, handle, handle.promise()._state->_lifetime))
             throw std::runtime_error("affine_task executor rejected coroutine");
     }
 
@@ -405,7 +443,8 @@ public:
             auto& executor = handle.promise()._executor;
             if (executor.is_current_thread())
                 return handle;
-            if (!executor.schedule(handle))
+            if (!detail::schedule(
+                    executor, handle, handle.promise()._state->_lifetime))
                 throw std::runtime_error("affine_task executor rejected continuation");
             return std::noop_coroutine();
         }
@@ -494,7 +533,8 @@ public:
         auto& executor = handle.promise()._executor;
         if (executor.is_current_thread())
             handle.resume();
-        else if (!executor.schedule(handle))
+        else if (!detail::schedule(
+                     executor, handle, handle.promise()._state->_lifetime))
             throw std::runtime_error("affine_task executor rejected coroutine");
     }
 
@@ -514,7 +554,8 @@ public:
             auto& executor = handle.promise()._executor;
             if (executor.is_current_thread())
                 return handle;
-            if (!executor.schedule(handle))
+            if (!detail::schedule(
+                    executor, handle, handle.promise()._state->_lifetime))
                 throw std::runtime_error("affine_task executor rejected continuation");
             return std::noop_coroutine();
         }
@@ -565,7 +606,10 @@ struct affine_task<T, Executor>::promise_type : detail::task_promise_base<T> {
                 return std::noop_coroutine();
             if (promise._executor.is_current_thread())
                 return promise._continuation;
-            if (!promise._executor.schedule(promise._continuation))
+            if (!detail::schedule(
+                    promise._executor,
+                    promise._continuation,
+                    promise._state->_lifetime))
                 std::terminate();
             return std::noop_coroutine();
         }
@@ -587,10 +631,12 @@ struct affine_task<T, Executor>::promise_type : detail::task_promise_base<T> {
             auto adapted = adapter::adapt(
                 std::forward<Awaitable>(awaitable), *this);
             return detail::affine_awaitable<decltype(adapted), Executor>{
-                std::move(adapted), _executor};
+                std::move(adapted), _executor, this->_state->_lifetime};
         } else {
             return detail::affine_awaitable<Awaitable, Executor>{
-                std::forward<Awaitable>(awaitable), _executor};
+                std::forward<Awaitable>(awaitable),
+                _executor,
+                this->_state->_lifetime};
         }
     }
 
@@ -634,7 +680,10 @@ struct affine_task<void, Executor>::promise_type : detail::task_promise_base<voi
                 return std::noop_coroutine();
             if (promise._executor.is_current_thread())
                 return promise._continuation;
-            if (!promise._executor.schedule(promise._continuation))
+            if (!detail::schedule(
+                    promise._executor,
+                    promise._continuation,
+                    promise._state->_lifetime))
                 std::terminate();
             return std::noop_coroutine();
         }
@@ -656,10 +705,12 @@ struct affine_task<void, Executor>::promise_type : detail::task_promise_base<voi
             auto adapted = adapter::adapt(
                 std::forward<Awaitable>(awaitable), *this);
             return detail::affine_awaitable<decltype(adapted), Executor>{
-                std::move(adapted), _executor};
+                std::move(adapted), _executor, this->_state->_lifetime};
         } else {
             return detail::affine_awaitable<Awaitable, Executor>{
-                std::forward<Awaitable>(awaitable), _executor};
+                std::forward<Awaitable>(awaitable),
+                _executor,
+                this->_state->_lifetime};
         }
     }
 

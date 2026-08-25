@@ -220,6 +220,7 @@ TEST_CASE("closing main thread executor makes queued callbacks harmless") {
         executor.close();
     }
 
+    executor.drain();
     host.pump_until([&] { return host.empty(); });
     CHECK_FALSE(ran);
     CHECK_FALSE(executor.accepting());
