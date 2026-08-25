@@ -48,11 +48,11 @@ public:
 
         auto& executor = _task.executor();
         if (!state->is_completed()) {
-            if constexpr (sync_executor<Executor>) {
+            if constexpr (drainable_executor<Executor>) {
                 executor.run_until([&] { return state->is_completed(); });
             } else {
                 throw std::logic_error(
-                    "root_scope requires a sync executor to drain active tasks");
+                    "root_scope requires a drainable executor for active tasks");
             }
         }
 

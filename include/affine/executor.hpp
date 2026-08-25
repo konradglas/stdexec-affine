@@ -12,12 +12,8 @@ concept executor = requires(E& value, std::coroutine_handle<> handle) {
 };
 
 template<class E>
-concept sync_executor = executor<E> && requires(E& value) {
-    value.run_until([] { return true; });
-};
-
-template<class E>
 concept drainable_executor = executor<E> && requires(E& value) {
+    value.run_until([] { return true; });
     value.drain();
 };
 

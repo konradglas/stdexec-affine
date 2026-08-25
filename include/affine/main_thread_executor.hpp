@@ -175,7 +175,6 @@ private:
 };
 
 static_assert(executor<main_thread_executor>);
-static_assert(sync_executor<main_thread_executor>);
 static_assert(drainable_executor<main_thread_executor>);
 
 } // namespace affine

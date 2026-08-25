@@ -95,6 +95,21 @@ public:
         }
     }
 
+    void drain() {
+        REQUIRE(is_current_thread());
+        for (;;) {
+            std::coroutine_handle<> next;
+            {
+                std::lock_guard lock(_state->_mutex);
+                if (_state->_queue.empty())
+                    return;
+                next = _state->_queue.front();
+                _state->_queue.pop_front();
+            }
+            next.resume();
+        }
+    }
+
 private:
     struct state {
         explicit state(std::thread::id owner) : _owner(owner) {}

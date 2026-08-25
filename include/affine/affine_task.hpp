@@ -315,10 +315,13 @@ using operation_cancelled = detail::operation_cancelled;
  *
  *   bool is_current_thread() const noexcept;
  *   bool schedule(std::coroutine_handle<>);
+ * A drainable Executor additionally provides:
+ *
+ *   void drain();
  *   void run_until(Predicate&& predicate);
  *
- * `run_until` is only required when synchronous waiting is used. It must
- * cooperatively execute work belonging to the executor on its owner thread.
+ * Synchronous waiting requires a drainable executor. `run_until` must
+ * cooperatively execute queued work on the executor's owner thread.
  */
 template<class T, class Executor>
 class [[nodiscard]] affine_task {
@@ -734,8 +737,8 @@ struct affine_task<void, Executor>::promise_type : detail::task_promise_base<voi
 
 template<class T, class Executor>
 T sync_wait(affine_task<T, Executor> task) {
-    static_assert(sync_executor<Executor>,
-                  "Executor must provide run_until(Predicate) for sync_wait");
+    static_assert(drainable_executor<Executor>,
+                  "sync_wait requires a drainable executor");
     auto state = task.state();
     if (!state)
         throw std::invalid_argument("sync_wait requires a valid affine_task");
@@ -756,8 +759,8 @@ T sync_wait(affine_task<T, Executor> task) {
 
 template<class Executor>
 void sync_wait(affine_task<void, Executor> task) {
-    static_assert(sync_executor<Executor>,
-                  "Executor must provide run_until(Predicate) for sync_wait");
+    static_assert(drainable_executor<Executor>,
+                  "sync_wait requires a drainable executor");
     auto state = task.state();
     if (!state)
         throw std::invalid_argument("sync_wait requires a valid affine_task");
