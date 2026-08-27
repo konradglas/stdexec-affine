@@ -121,6 +121,15 @@ private:
     std::shared_ptr<state> _state;
 };
 
+struct inline_executor {
+    bool is_current_thread() const noexcept { return true; }
+
+    bool schedule(std::coroutine_handle<> handle) const {
+        handle.resume();
+        return true;
+    }
+};
+
 affine::affine_task<int, manual_executor> answer(manual_executor executor) {
     co_return 42;
 }
@@ -156,6 +165,11 @@ affine::affine_task<void, Executor> observe_nested_stop(
     Executor executor, bool& observed) {
     co_await observe_stop(executor, observed);
     co_return;
+}
+
+affine::affine_task<void, manual_executor> observe_cross_executor_stop(
+    manual_executor executor, bool& observed) {
+    co_await observe_stop(inline_executor{}, observed);
 }
 
 affine::affine_task<int, manual_executor> arbitrary_awaitable(
@@ -212,6 +226,16 @@ TEST_CASE("nested tasks inherit cooperative cancellation") {
     manual_executor executor;
     bool observed = false;
     auto task = observe_nested_stop(executor, observed);
+
+    CHECK(task.request_stop());
+    affine::sync_wait(std::move(task));
+    CHECK(observed);
+}
+
+TEST_CASE("tasks on another executor inherit cooperative cancellation") {
+    manual_executor executor;
+    bool observed = false;
+    auto task = observe_cross_executor_stop(executor, observed);
 
     CHECK(task.request_stop());
     affine::sync_wait(std::move(task));

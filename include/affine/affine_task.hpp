@@ -229,9 +229,18 @@ template<class Executor>
 struct continuation_bridge<Executor>::promise_type {
     Executor _executor;
     std::coroutine_handle<> _continuation{};
+    std::stop_token _stop_token;
 
-    promise_type(Executor executor, std::coroutine_handle<> continuation)
-        : _executor(std::move(executor)), _continuation(continuation) {}
+    promise_type(Executor executor,
+                 std::coroutine_handle<> continuation,
+                 std::stop_token stop_token)
+        : _executor(std::move(executor)),
+          _continuation(continuation),
+          _stop_token(stop_token) {}
+
+    [[nodiscard]] std::stop_token stop_token() const noexcept {
+        return _stop_token;
+    }
 
     continuation_bridge get_return_object() noexcept {
         return continuation_bridge{handle_type::from_promise(*this)};
@@ -260,7 +269,9 @@ struct continuation_bridge<Executor>::promise_type {
 
 template<class Executor>
 continuation_bridge<Executor> make_continuation_bridge(
-    Executor executor, std::coroutine_handle<> continuation) {
+    Executor executor,
+    std::coroutine_handle<> continuation,
+    std::stop_token stop_token) {
     co_return;
 }
 
@@ -272,17 +283,21 @@ class affine_awaitable {
     using bridge_type = continuation_bridge<Executor>;
 
 public:
-    affine_awaitable(Awaitable&& awaitable, Executor executor)
+    affine_awaitable(Awaitable&& awaitable,
+                     Executor executor,
+                     std::stop_token stop_token)
         : _awaitable(std::forward<Awaitable>(awaitable)),
           _awaiter(get_awaiter(std::move(_awaitable).get())),
-          _executor(std::move(executor)) {}
+          _executor(std::move(executor)),
+          _stop_token(stop_token) {}
 
     bool await_ready() noexcept(noexcept(_awaiter.await_ready())) {
         return _awaiter.await_ready();
     }
 
     auto await_suspend(std::coroutine_handle<> continuation) {
-        _bridge.emplace(make_continuation_bridge(_executor, continuation));
+        _bridge.emplace(make_continuation_bridge(
+            _executor, continuation, _stop_token));
         auto bridge_handle = _bridge->handle();
 
         using result_type = decltype(_awaiter.await_suspend(bridge_handle));
@@ -306,6 +321,7 @@ private:
     storage_type _awaitable;
     awaiter_type _awaiter;
     Executor _executor;
+    std::stop_token _stop_token;
     std::optional<bridge_type> _bridge;
 };
 
@@ -650,6 +666,15 @@ struct affine_task<T, Executor>::promise_type : detail::task_promise_base<T> {
         return std::move(child).operator co_await();
     }
 
+    template<class U, class ChildExecutor>
+        requires (!std::same_as<ChildExecutor, Executor>)
+    auto await_transform(affine_task<U, ChildExecutor>&& child) {
+        auto awaiter = std::move(child).operator co_await();
+        return detail::affine_awaitable<decltype(awaiter), Executor>{
+            std::move(awaiter), _executor,
+            this->_state->_stop_source.get_token()};
+    }
+
     template<class Awaitable>
     auto await_transform(Awaitable&& awaitable) {
         using adapter = detail::awaitable_adapter<
@@ -662,11 +687,13 @@ struct affine_task<T, Executor>::promise_type : detail::task_promise_base<T> {
                 auto adapted = adapter::adapt(
                     std::forward<Awaitable>(awaitable), *this);
                 return detail::affine_awaitable<decltype(adapted), Executor>{
-                    std::move(adapted), _executor};
+                    std::move(adapted), _executor,
+                    this->_state->_stop_source.get_token()};
             }
         } else {
             return detail::affine_awaitable<Awaitable, Executor>{
-                std::forward<Awaitable>(awaitable), _executor};
+                std::forward<Awaitable>(awaitable), _executor,
+                this->_state->_stop_source.get_token()};
         }
     }
 
@@ -733,6 +760,15 @@ struct affine_task<void, Executor>::promise_type : detail::task_promise_base<voi
         return std::move(child).operator co_await();
     }
 
+    template<class U, class ChildExecutor>
+        requires (!std::same_as<ChildExecutor, Executor>)
+    auto await_transform(affine_task<U, ChildExecutor>&& child) {
+        auto awaiter = std::move(child).operator co_await();
+        return detail::affine_awaitable<decltype(awaiter), Executor>{
+            std::move(awaiter), _executor,
+            this->_state->_stop_source.get_token()};
+    }
+
     template<class Awaitable>
     auto await_transform(Awaitable&& awaitable) {
         using adapter = detail::awaitable_adapter<
@@ -745,11 +781,13 @@ struct affine_task<void, Executor>::promise_type : detail::task_promise_base<voi
                 auto adapted = adapter::adapt(
                     std::forward<Awaitable>(awaitable), *this);
                 return detail::affine_awaitable<decltype(adapted), Executor>{
-                    std::move(adapted), _executor};
+                    std::move(adapted), _executor,
+                    this->_state->_stop_source.get_token()};
             }
         } else {
             return detail::affine_awaitable<Awaitable, Executor>{
-                std::forward<Awaitable>(awaitable), _executor};
+                std::forward<Awaitable>(awaitable), _executor,
+                this->_state->_stop_source.get_token()};
         }
     }
 
