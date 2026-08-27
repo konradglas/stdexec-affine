@@ -457,8 +457,8 @@ public:
     };
 
 private:
-    template<class Awaitable>
-    friend decltype(auto) detail::get_awaiter(Awaitable&&);
+    template<class, class>
+    friend class affine_task;
 
     awaiter operator co_await() && noexcept {
         return awaiter{std::exchange(_handle, {})};
@@ -587,8 +587,8 @@ public:
     };
 
 private:
-    template<class Awaitable>
-    friend decltype(auto) detail::get_awaiter(Awaitable&&);
+    template<class, class>
+    friend class affine_task;
 
     awaiter operator co_await() && noexcept {
         return awaiter{std::exchange(_handle, {})};
@@ -647,7 +647,7 @@ struct affine_task<T, Executor>::promise_type : detail::task_promise_base<T> {
     auto await_transform(affine_task<U, Executor>&& child) {
         child.bind_executor(_executor);
         child.inherit_stop_token(this->_state->_stop_source.get_token());
-        return detail::get_awaiter(std::move(child));
+        return std::move(child).operator co_await();
     }
 
     template<class Awaitable>
@@ -730,7 +730,7 @@ struct affine_task<void, Executor>::promise_type : detail::task_promise_base<voi
     auto await_transform(affine_task<U, Executor>&& child) {
         child.bind_executor(_executor);
         child.inherit_stop_token(this->_state->_stop_source.get_token());
-        return detail::get_awaiter(std::move(child));
+        return std::move(child).operator co_await();
     }
 
     template<class Awaitable>
