@@ -98,6 +98,18 @@ auto continue_exec_task_on_executor(
     }
 }
 
+template<class T, class Sender>
+    requires (!std::is_void_v<T>)
+auto sender_as_exec_task(Sender sender) -> exec::task<T> {
+    co_return co_await std::move(sender);
+}
+
+template<class T, class Sender>
+    requires std::is_void_v<T>
+auto sender_as_exec_task(Sender sender) -> exec::task<void> {
+    co_await std::move(sender);
+}
+
 template<class Promise>
 struct environment_adapter<
     Promise, std::void_t<decltype(std::declval<Promise const&>().stop_token())>> {
@@ -119,12 +131,22 @@ template<class Sender, class Promise>
     requires stdexec::sender<Sender>
 struct awaitable_adapter<Sender, Promise> {
     static constexpr bool customized = true;
-    static constexpr bool preserves_affinity = false;
+    static constexpr bool preserves_affinity = true;
 
-    template<class S>
-    static auto adapt(S&& sender, Promise& promise) {
+    template<class S, class Executor>
+    static auto adapt(S&& sender, Promise& promise, Executor executor) {
+        using sender_awaiter = decltype(stdexec::as_awaitable(
+            std::declval<S>(), promise));
+        using result_type = decltype(
+            std::declval<sender_awaiter&>().await_resume());
+        auto sender_with_environment = stdexec::write_env(
+            static_cast<S&&>(sender), promise.get_env());
         return stdexec::as_awaitable(
-            static_cast<S&&>(sender), promise);
+            continue_exec_task_on_executor(
+                sender_as_exec_task<result_type>(
+                    std::move(sender_with_environment)),
+                std::move(executor)),
+            promise);
     }
 };
 

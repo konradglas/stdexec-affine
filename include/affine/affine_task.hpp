@@ -372,6 +372,10 @@ public:
 
     [[nodiscard]] bool valid() const noexcept { return !!_handle; }
 
+    [[nodiscard]] bool has_executor() const noexcept {
+        return _handle && _handle.promise()._executor.has_value();
+    }
+
     [[nodiscard]] bool done() const noexcept {
         return !_handle || _handle.done() || _handle.promise()._state->is_completed();
     }
@@ -394,15 +398,15 @@ public:
             _handle.promise()._state->inherit_stop_token(token);
     }
 
-    void bind_executor(Executor executor) {
-        if (_handle)
-            _handle.promise()._executor = std::move(executor);
+    [[nodiscard]] affine_task&& scheduleOn(Executor executor) && {
+        bind_executor(std::move(executor), true);
+        return std::move(*this);
     }
 
     [[nodiscard]] Executor& executor() {
-        if (!_handle)
-            throw std::logic_error("affine_task has no executor");
-        return _handle.promise()._executor;
+        if (!has_executor())
+            throw std::logic_error("affine_task is not scheduled on an executor");
+        return *_handle.promise()._executor;
     }
 
     void start() {
@@ -410,7 +414,7 @@ public:
             return;
 
         auto handle = _handle;
-        auto& executor = handle.promise()._executor;
+        auto& executor = this->executor();
         if (executor.is_current_thread())
             handle.resume();
         else if (!executor.schedule(handle))
@@ -440,7 +444,7 @@ public:
                     continuation.promise().stop_token());
             }
             _handle.promise()._continuation = continuation;
-            auto& executor = _handle.promise()._executor;
+            auto& executor = *_handle.promise()._executor;
             if (executor.is_current_thread())
                 return _handle;
             if (!executor.schedule(_handle))
@@ -475,6 +479,17 @@ public:
 private:
     template<class, class>
     friend class affine_task;
+
+    [[nodiscard]] bool explicitly_scheduled() const noexcept {
+        return _handle && _handle.promise()._explicitly_scheduled;
+    }
+
+    void bind_executor(Executor executor, bool explicit_schedule = false) {
+        if (_handle) {
+            _handle.promise()._executor.emplace(std::move(executor));
+            _handle.promise()._explicitly_scheduled = explicit_schedule;
+        }
+    }
 
     awaiter operator co_await() && noexcept {
         return awaiter{std::exchange(_handle, {})};
@@ -512,6 +527,9 @@ public:
     ~affine_task() { destroy(); }
 
     [[nodiscard]] bool valid() const noexcept { return !!_handle; }
+    [[nodiscard]] bool has_executor() const noexcept {
+        return _handle && _handle.promise()._executor.has_value();
+    }
     [[nodiscard]] bool done() const noexcept {
         return !_handle || _handle.done() || _handle.promise()._state->is_completed();
     }
@@ -533,22 +551,22 @@ public:
             _handle.promise()._state->inherit_stop_token(token);
     }
 
-    void bind_executor(Executor executor) {
-        if (_handle)
-            _handle.promise()._executor = std::move(executor);
+    [[nodiscard]] affine_task&& scheduleOn(Executor executor) && {
+        bind_executor(std::move(executor), true);
+        return std::move(*this);
     }
 
     [[nodiscard]] Executor& executor() {
-        if (!_handle)
-            throw std::logic_error("affine_task has no executor");
-        return _handle.promise()._executor;
+        if (!has_executor())
+            throw std::logic_error("affine_task is not scheduled on an executor");
+        return *_handle.promise()._executor;
     }
 
     void start() {
         if (!_handle)
             return;
         auto handle = _handle;
-        auto& executor = handle.promise()._executor;
+        auto& executor = this->executor();
         if (executor.is_current_thread())
             handle.resume();
         else if (!executor.schedule(handle))
@@ -577,7 +595,7 @@ public:
                     continuation.promise().stop_token());
             }
             _handle.promise()._continuation = continuation;
-            auto& executor = _handle.promise()._executor;
+            auto& executor = *_handle.promise()._executor;
             if (executor.is_current_thread())
                 return _handle;
             if (!executor.schedule(_handle))
@@ -606,6 +624,17 @@ private:
     template<class, class>
     friend class affine_task;
 
+    [[nodiscard]] bool explicitly_scheduled() const noexcept {
+        return _handle && _handle.promise()._explicitly_scheduled;
+    }
+
+    void bind_executor(Executor executor, bool explicit_schedule = false) {
+        if (_handle) {
+            _handle.promise()._executor.emplace(std::move(executor));
+            _handle.promise()._explicitly_scheduled = explicit_schedule;
+        }
+    }
+
     awaiter operator co_await() && noexcept {
         return awaiter{std::exchange(_handle, {})};
     }
@@ -622,20 +651,17 @@ private:
 
 template<class T, class Executor>
 struct affine_task<T, Executor>::promise_type : detail::task_promise_base<T> {
-    Executor _executor;
+    std::optional<Executor> _executor;
     std::coroutine_handle<> _continuation{};
+    bool _explicitly_scheduled = false;
 
-    promise_type() requires std::default_initializable<Executor> = default;
-
-    template<class... Args>
-    explicit promise_type(Executor executor, Args&&...)
-        : _executor(std::move(executor)) {}
+    promise_type() {
+        if constexpr (std::default_initializable<Executor>)
+            _executor.emplace();
+    }
 
     template<class First, class... Rest>
-        requires (!std::same_as<std::remove_cvref_t<First>, Executor>
-                  && std::default_initializable<Executor>)
-    explicit promise_type(First&&, Rest&&...)
-        : _executor() {}
+    explicit promise_type(First&&, Rest&&...) : promise_type() {}
 
     affine_task get_return_object() noexcept {
         return affine_task{handle_type::from_promise(*this)};
@@ -649,9 +675,10 @@ struct affine_task<T, Executor>::promise_type : detail::task_promise_base<T> {
             promise._state->complete(promise._state->_error);
             if (!promise._continuation)
                 return std::noop_coroutine();
-            if (promise._executor.is_current_thread())
+            auto& executor = *promise._executor;
+            if (executor.is_current_thread())
                 return promise._continuation;
-            if (!promise._executor.schedule(promise._continuation))
+            if (!executor.schedule(promise._continuation))
                 std::terminate();
             return std::noop_coroutine();
         }
@@ -659,19 +686,18 @@ struct affine_task<T, Executor>::promise_type : detail::task_promise_base<T> {
     };
 
     final_awaiter final_suspend() const noexcept { return {}; }
-    template<class U>
-    auto await_transform(affine_task<U, Executor>&& child) {
-        child.bind_executor(_executor);
-        child.inherit_stop_token(this->_state->_stop_source.get_token());
-        return std::move(child).operator co_await();
-    }
-
     template<class U, class ChildExecutor>
-        requires (!std::same_as<ChildExecutor, Executor>)
     auto await_transform(affine_task<U, ChildExecutor>&& child) {
+        if constexpr (std::same_as<ChildExecutor, Executor>) {
+            if (!child.explicitly_scheduled())
+                child.bind_executor(*_executor);
+        } else if (!child.has_executor()) {
+            throw std::logic_error(
+                "a task on another executor type requires scheduleOn()");
+        }
         auto awaiter = std::move(child).operator co_await();
         return detail::affine_awaitable<decltype(awaiter), Executor>{
-            std::move(awaiter), _executor,
+            std::move(awaiter), *_executor,
             this->_state->_stop_source.get_token()};
     }
 
@@ -682,17 +708,17 @@ struct affine_task<T, Executor>::promise_type : detail::task_promise_base<T> {
         if constexpr (adapter::customized) {
             if constexpr (adapter::preserves_affinity) {
                 return adapter::adapt(
-                    std::forward<Awaitable>(awaitable), *this, _executor);
+                    std::forward<Awaitable>(awaitable), *this, *_executor);
             } else {
                 auto adapted = adapter::adapt(
                     std::forward<Awaitable>(awaitable), *this);
                 return detail::affine_awaitable<decltype(adapted), Executor>{
-                    std::move(adapted), _executor,
+                    std::move(adapted), *_executor,
                     this->_state->_stop_source.get_token()};
             }
         } else {
             return detail::affine_awaitable<Awaitable, Executor>{
-                std::forward<Awaitable>(awaitable), _executor,
+                std::forward<Awaitable>(awaitable), *_executor,
                 this->_state->_stop_source.get_token()};
         }
     }
@@ -716,20 +742,17 @@ struct affine_task<T, Executor>::promise_type : detail::task_promise_base<T> {
 
 template<class Executor>
 struct affine_task<void, Executor>::promise_type : detail::task_promise_base<void> {
-    Executor _executor;
+    std::optional<Executor> _executor;
     std::coroutine_handle<> _continuation{};
+    bool _explicitly_scheduled = false;
 
-    promise_type() requires std::default_initializable<Executor> = default;
-
-    template<class... Args>
-    explicit promise_type(Executor executor, Args&&...)
-        : _executor(std::move(executor)) {}
+    promise_type() {
+        if constexpr (std::default_initializable<Executor>)
+            _executor.emplace();
+    }
 
     template<class First, class... Rest>
-        requires (!std::same_as<std::remove_cvref_t<First>, Executor>
-                  && std::default_initializable<Executor>)
-    explicit promise_type(First&&, Rest&&...)
-        : _executor() {}
+    explicit promise_type(First&&, Rest&&...) : promise_type() {}
 
     affine_task get_return_object() noexcept {
         return affine_task{handle_type::from_promise(*this)};
@@ -743,9 +766,10 @@ struct affine_task<void, Executor>::promise_type : detail::task_promise_base<voi
             promise._state->complete(promise._state->_error);
             if (!promise._continuation)
                 return std::noop_coroutine();
-            if (promise._executor.is_current_thread())
+            auto& executor = *promise._executor;
+            if (executor.is_current_thread())
                 return promise._continuation;
-            if (!promise._executor.schedule(promise._continuation))
+            if (!executor.schedule(promise._continuation))
                 std::terminate();
             return std::noop_coroutine();
         }
@@ -753,19 +777,18 @@ struct affine_task<void, Executor>::promise_type : detail::task_promise_base<voi
     };
 
     final_awaiter final_suspend() const noexcept { return {}; }
-    template<class U>
-    auto await_transform(affine_task<U, Executor>&& child) {
-        child.bind_executor(_executor);
-        child.inherit_stop_token(this->_state->_stop_source.get_token());
-        return std::move(child).operator co_await();
-    }
-
     template<class U, class ChildExecutor>
-        requires (!std::same_as<ChildExecutor, Executor>)
     auto await_transform(affine_task<U, ChildExecutor>&& child) {
+        if constexpr (std::same_as<ChildExecutor, Executor>) {
+            if (!child.explicitly_scheduled())
+                child.bind_executor(*_executor);
+        } else if (!child.has_executor()) {
+            throw std::logic_error(
+                "a task on another executor type requires scheduleOn()");
+        }
         auto awaiter = std::move(child).operator co_await();
         return detail::affine_awaitable<decltype(awaiter), Executor>{
-            std::move(awaiter), _executor,
+            std::move(awaiter), *_executor,
             this->_state->_stop_source.get_token()};
     }
 
@@ -776,17 +799,17 @@ struct affine_task<void, Executor>::promise_type : detail::task_promise_base<voi
         if constexpr (adapter::customized) {
             if constexpr (adapter::preserves_affinity) {
                 return adapter::adapt(
-                    std::forward<Awaitable>(awaitable), *this, _executor);
+                    std::forward<Awaitable>(awaitable), *this, *_executor);
             } else {
                 auto adapted = adapter::adapt(
                     std::forward<Awaitable>(awaitable), *this);
                 return detail::affine_awaitable<decltype(adapted), Executor>{
-                    std::move(adapted), _executor,
+                    std::move(adapted), *_executor,
                     this->_state->_stop_source.get_token()};
             }
         } else {
             return detail::affine_awaitable<Awaitable, Executor>{
-                std::forward<Awaitable>(awaitable), _executor,
+                std::forward<Awaitable>(awaitable), *_executor,
                 this->_state->_stop_source.get_token()};
         }
     }
@@ -816,7 +839,10 @@ T sync_wait(affine_task<T, Executor> task) {
 
     auto& executor = task.executor();
     task.start();
-    executor.run_until([&] { return state->is_completed(); });
+    if (executor.is_current_thread())
+        executor.run_until([&] { return state->is_completed(); });
+    else
+        state->wait();
 
     if (state->status() == detail::completion_status::cancelled)
         throw operation_cancelled{};
@@ -837,7 +863,10 @@ void sync_wait(affine_task<void, Executor> task) {
         throw std::invalid_argument("sync_wait requires a valid affine_task");
     auto& executor = task.executor();
     task.start();
-    executor.run_until([&] { return state->is_completed(); });
+    if (executor.is_current_thread())
+        executor.run_until([&] { return state->is_completed(); });
+    else
+        state->wait();
     if (state->status() == detail::completion_status::cancelled)
         throw operation_cancelled{};
     if (state->_error)

@@ -50,9 +50,23 @@ The generic task type is:
 affine::affine_task<T, Executor>
 ```
 
-The executor can be supplied as the coroutine's first argument. If `Executor`
-is default-constructible, it may be omitted; structurally awaited affine tasks
-are rebound to their parent's executor.
+Tasks are lazy. An unbound child task with the same executor type inherits its
+parent's executor. Use `scheduleOn()` only to choose a root executor or to make
+an intentional affinity change:
+
+```cpp
+co_await child();                         // inherit the parent executor
+co_await child().scheduleOn(other);       // run child on other, return to parent
+
+auto root = affine::spawn(
+    root_task().scheduleOn(executor), root_scope);
+```
+
+If `Executor` is default-constructible, a task receives an implicit default
+executor. A same-type parent still replaces that implicit executor, while an
+executor supplied through `scheduleOn()` is always preserved. This keeps
+unique execution domains such as a main-thread executor convenient without
+conflating separate instances of a serial executor.
 
 The optional stdexec integration adapts senders and `exec::task` while
 preserving executor affinity:
@@ -69,7 +83,8 @@ Detached roots are owned explicitly by a root scope:
 #include <affine/root_scope.hpp>
 
 auto root_scope = affine::create_root_scope();
-auto loading = affine::spawn(root_task(executor), root_scope);
+auto loading = affine::spawn(
+    root_task().scheduleOn(executor), root_scope);
 
 // Cancel and synchronously finish one subtree while the executor stays open:
 loading.shutdown_and_wait();
@@ -112,18 +127,41 @@ Already-submitted host callbacks may still run later as claimed no-ops. A host
 that unloads plug-in code must therefore place its own unload barrier after
 plug-in teardown.
 
+## Owned serial threads
+
+`<affine/serial_executor.hpp>` provides a dedicated single-thread context and
+a copyable executor handle:
+
+```cpp
+affine::single_thread_context context;
+auto executor = context.get_executor();
+
+auto task = work().scheduleOn(executor);
+affine::sync_wait(std::move(task));
+
+context.shutdown_and_wait();
+```
+
+The executor serializes every task body and continuation on its owned thread,
+so mutable data confined to that executor needs no additional locking. The
+context must outlive all of its tasks. Drain root scopes before stopping and
+joining the context; the executor intentionally has no `close()` operation
+that could reject an in-flight continuation during root shutdown.
+
 ## Cancellation
 
 Tasks expose cooperative cancellation through their context:
 
 ```cpp
-affine::affine_task<void, Executor> work(Executor executor) {
+affine::affine_task<void, Executor> work() {
     auto token = co_await affine::this_task::stop_token;
     if (token.stop_requested())
         co_return;
 
     // cancellable work...
 }
+
+auto task = work().scheduleOn(executor);
 ```
 
 Call `task.request_stop()` to request cancellation. Awaitables opt in by

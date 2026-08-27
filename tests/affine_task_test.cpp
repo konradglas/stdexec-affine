@@ -4,9 +4,11 @@
 #include <affine/affine_task.hpp>
 #include <affine/main_thread_executor.hpp>
 #include <affine/root_scope.hpp>
+#include <affine/serial_executor.hpp>
 
 #if defined(AFFINE_TEST_HAS_STDEXEC)
 #  include <affine/stdexec.hpp>
+#  include <exec/single_thread_context.hpp>
 #  include <exec/task.hpp>
 #endif
 
@@ -172,6 +174,38 @@ affine::affine_task<void, manual_executor> observe_cross_executor_stop(
     co_await observe_stop(inline_executor{}, observed);
 }
 
+affine::affine_task<bool, affine::serial_executor> observe_serial_executor(
+    affine::serial_executor expected) {
+    co_return expected.is_current_thread();
+}
+
+affine::affine_task<bool, affine::serial_executor> observe_inherited_serial_executor(
+    affine::serial_executor expected) {
+    const bool child_used_parent = co_await observe_serial_executor(expected);
+    co_return child_used_parent && expected.is_current_thread();
+}
+
+affine::affine_task<void, affine::serial_executor> shutdown_scope(
+    affine::root_scope& scope) {
+    scope.shutdown_and_wait();
+    co_return;
+}
+
+struct executor_switch_observation {
+    bool child_used_second = false;
+    bool parent_returned_to_first = false;
+};
+
+affine::affine_task<executor_switch_observation, affine::serial_executor>
+observe_explicit_serial_executor_switch(affine::serial_executor first,
+                                        affine::serial_executor second) {
+    executor_switch_observation result;
+    result.child_used_second =
+        co_await observe_serial_executor(second).scheduleOn(second);
+    result.parent_returned_to_first = first.is_current_thread();
+    co_return result;
+}
+
 affine::affine_task<int, manual_executor> arbitrary_awaitable(
     manual_executor executor, bool& resumed_on_owner) {
     const auto value = co_await worker_awaitable{};
@@ -242,6 +276,45 @@ TEST_CASE("tasks on another executor inherit cooperative cancellation") {
     CHECK(observed);
 }
 
+TEST_CASE("unbound child tasks inherit their parent executor") {
+    affine::single_thread_context context;
+    auto executor = context.get_executor();
+
+    CHECK(affine::sync_wait(
+        observe_inherited_serial_executor(executor).scheduleOn(executor)));
+
+    context.shutdown_and_wait();
+}
+
+TEST_CASE("scheduleOn switches between instances of one executor type") {
+    affine::single_thread_context first_context;
+    affine::single_thread_context second_context;
+    auto first = first_context.get_executor();
+    auto second = second_context.get_executor();
+
+    const auto observation = affine::sync_wait(
+        observe_explicit_serial_executor_switch(first, second).scheduleOn(first));
+
+    CHECK(observation.child_used_second);
+    CHECK(observation.parent_returned_to_first);
+
+    first_context.shutdown_and_wait();
+    second_context.shutdown_and_wait();
+}
+
+TEST_CASE("spawn rejects an unbound root task") {
+    affine::single_thread_context context;
+    auto root = affine::create_root_scope();
+    bool ran = false;
+
+    CHECK_THROWS_AS(
+        affine::spawn(mark_ran(context.get_executor(), ran), root),
+        std::invalid_argument);
+
+    root.shutdown_and_wait();
+    context.shutdown_and_wait();
+}
+
 TEST_CASE("arbitrary awaitables hop the continuation back to the executor") {
     manual_executor executor;
     bool resumed_on_owner = false;
@@ -262,6 +335,38 @@ TEST_CASE("root scope owns an active task until drain completes") {
     CHECK(resumed_on_owner);
 }
 
+TEST_CASE("root shutdown waits for work on a serial executor") {
+    affine::single_thread_context context;
+    auto executor = context.get_executor();
+    bool resumed_on_owner = false;
+    auto scope = affine::create_root_scope();
+
+    affine::spawn(
+        scoped_arbitrary_awaitable(executor, resumed_on_owner)
+            .scheduleOn(executor),
+        scope);
+    scope.shutdown_and_wait();
+
+    CHECK(resumed_on_owner);
+    context.shutdown_and_wait();
+}
+
+TEST_CASE("root shutdown drains from the serial executor thread") {
+    affine::single_thread_context context;
+    auto executor = context.get_executor();
+    bool resumed_on_owner = false;
+    auto scope = affine::create_root_scope();
+
+    affine::spawn(
+        scoped_arbitrary_awaitable(executor, resumed_on_owner)
+            .scheduleOn(executor),
+        scope);
+    affine::sync_wait(shutdown_scope(scope).scheduleOn(executor));
+
+    CHECK(resumed_on_owner);
+    context.shutdown_and_wait();
+}
+
 TEST_CASE("child shutdown drains while the executor remains open") {
     host_queue host;
     affine::main_thread_executor executor(
@@ -272,9 +377,13 @@ TEST_CASE("child shutdown drains while the executor remains open") {
     bool child_resumed = false;
     auto root = affine::create_root_scope();
     auto parent = affine::spawn(
-        scoped_arbitrary_awaitable(executor, parent_resumed), root);
+        scoped_arbitrary_awaitable(executor, parent_resumed)
+            .scheduleOn(executor),
+        root);
     auto child = affine::spawn(
-        scoped_arbitrary_awaitable(executor, child_resumed), parent);
+        scoped_arbitrary_awaitable(executor, child_resumed)
+            .scheduleOn(executor),
+        parent);
 
     parent.shutdown_and_wait();
 
@@ -297,7 +406,9 @@ TEST_CASE("worker-thread waits block without draining the owner executor") {
     bool resumed_on_owner = false;
     auto root = affine::create_root_scope();
     auto child = affine::spawn(
-        scoped_arbitrary_awaitable(executor, resumed_on_owner), root);
+        scoped_arbitrary_awaitable(executor, resumed_on_owner)
+            .scheduleOn(executor),
+        root);
 
     std::atomic<bool> wait_returned = false;
     std::thread waiter([&] {
@@ -323,7 +434,7 @@ TEST_CASE("main thread executor bridges a host dispatch queue") {
         [&](std::function<bool()> done) { host.pump_until(std::move(done)); });
 
     bool ran = false;
-    auto task = mark_ran(executor, ran);
+    auto task = mark_ran(executor, ran).scheduleOn(executor);
     std::thread worker([&] { task.start(); });
 
     executor.run_until([&] { return task.done(); });
@@ -338,7 +449,7 @@ TEST_CASE("closing main thread executor makes queued callbacks harmless") {
         [&](std::function<void()> callback) { host.enqueue(std::move(callback)); });
 
     bool ran = false;
-    auto task = mark_ran(executor, ran);
+    auto task = mark_ran(executor, ran).scheduleOn(executor);
     std::thread worker([&] { task.start(); });
     worker.join();
     executor.close();
@@ -357,7 +468,7 @@ TEST_CASE("main thread executor drains claimed callbacks on its owner thread") {
         [&](std::function<void()> callback) { host.enqueue(std::move(callback)); });
 
     bool ran = false;
-    auto task = mark_ran(executor, ran);
+    auto task = mark_ran(executor, ran).scheduleOn(executor);
     std::thread worker([&] { task.start(); });
     worker.join();
 
@@ -372,6 +483,19 @@ TEST_CASE("main thread executor drains claimed callbacks on its owner thread") {
 affine::affine_task<int, manual_executor> sender_awaitable(
     manual_executor executor) {
     co_return co_await stdexec::just(99);
+}
+
+using single_thread_scheduler = decltype(
+    std::declval<exec::single_thread_context&>().get_scheduler());
+
+affine::affine_task<int, manual_executor> asynchronous_sender_awaitable(
+    manual_executor executor,
+    single_thread_scheduler scheduler,
+    bool& resumed_on_owner) {
+    const auto result = co_await stdexec::starts_on(
+        std::move(scheduler), stdexec::just(101));
+    resumed_on_owner = executor.is_current_thread();
+    co_return result;
 }
 
 affine::affine_task<void, manual_executor> observe_stdexec_stop(
@@ -411,6 +535,18 @@ TEST_CASE("stdexec senders are adapted as affine awaitables") {
     CHECK(affine::sync_wait(sender_awaitable(executor)) == 99);
 }
 
+TEST_CASE("asynchronous stdexec senders return to the affine executor") {
+    exec::single_thread_context worker;
+    manual_executor executor;
+    bool resumed_on_owner = false;
+
+    CHECK(affine::sync_wait(
+        asynchronous_sender_awaitable(
+            executor, worker.get_scheduler(), resumed_on_owner)
+            .scheduleOn(executor)) == 101);
+    CHECK(resumed_on_owner);
+}
+
 TEST_CASE("stdexec sender environment exposes the task stop token") {
     manual_executor executor;
     bool observed = false;
@@ -437,7 +573,10 @@ TEST_CASE("root scope drains a foreign task back onto the affine executor") {
     int result = 0;
     bool resumed_on_owner = false;
     auto scope = affine::create_root_scope();
-    affine::spawn(scoped_root_task(executor, result, resumed_on_owner), scope);
+    affine::spawn(
+        scoped_root_task(executor, result, resumed_on_owner)
+            .scheduleOn(executor),
+        scope);
 
     scope.close();
     scope.drain();

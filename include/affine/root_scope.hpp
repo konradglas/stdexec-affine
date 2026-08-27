@@ -287,6 +287,9 @@ template<class Executor, class Parent>
 task_handle spawn_impl(affine_task<void, Executor> task, const Parent& parent) {
     if (!task.valid())
         throw std::invalid_argument("spawn requires a valid affine_task");
+    if (!task.has_executor())
+        throw std::invalid_argument(
+            "spawn requires a task scheduled on an executor");
 
     auto operation =
         std::make_shared<detail::scoped_task_operation<Executor>>(std::move(task));
