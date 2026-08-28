@@ -155,7 +155,7 @@ class single_thread_context {
 public:
     single_thread_context()
         : _state(std::make_shared<detail::serial_executor_state>()),
-          _thread([state = _state] { state->run(); }) {
+          _workerThread([state = _state] { state->run(); }) {
         _state->wait_until_started();
     }
 
@@ -163,12 +163,12 @@ public:
     single_thread_context& operator=(const single_thread_context&) = delete;
 
     ~single_thread_context() {
-        if (!_thread.joinable())
+        if (!_workerThread.joinable())
             return;
-        if (std::this_thread::get_id() == _thread.get_id())
+        if (std::this_thread::get_id() == _workerThread.get_id())
             std::terminate();
         _state->request_stop();
-        _thread.join();
+        _workerThread.join();
     }
 
     [[nodiscard]] serial_executor get_executor() const {
@@ -176,18 +176,18 @@ public:
     }
 
     void shutdown_and_wait() {
-        if (!_thread.joinable())
+        if (!_workerThread.joinable())
             return;
-        if (std::this_thread::get_id() == _thread.get_id())
+        if (std::this_thread::get_id() == _workerThread.get_id())
             throw std::logic_error(
                 "single_thread_context cannot join its own thread");
         _state->request_stop();
-        _thread.join();
+        _workerThread.join();
     }
 
 private:
     std::shared_ptr<detail::serial_executor_state> _state;
-    std::thread _thread;
+    std::thread _workerThread;
 };
 
 static_assert(executor<serial_executor>);
