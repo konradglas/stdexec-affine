@@ -18,6 +18,10 @@ public:
         callback_type(stdexec_stop_token token, Callback callback) noexcept
             : _callback(token._token, std::move(callback)) {}
 
+        template<class StopSource>
+        callback_type(stdexec_stop_token token, StopSource& source) noexcept
+            : _callback(token._token, Callback{source}) {}
+
     private:
         std::stop_callback<Callback> _callback;
     };
