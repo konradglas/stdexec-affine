@@ -9,6 +9,7 @@
 #if defined(AFFINE_TEST_HAS_STDEXEC)
 #  include <affine/stdexec.hpp>
 #  include <exec/single_thread_context.hpp>
+#  include <exec/split.hpp>
 #  include <exec/task.hpp>
 #endif
 
@@ -533,6 +534,45 @@ affine::affine_task<void, affine::main_thread_executor> scoped_root_task(
 TEST_CASE("stdexec senders are adapted as affine awaitables") {
     manual_executor executor;
     CHECK(affine::sync_wait(sender_awaitable(executor)) == 99);
+}
+
+// AGENTIC: split supplies a non-copyable operation-state reference as its stop callback.
+affine::affine_task<int, manual_executor> shared_sender_awaitable(
+    manual_executor executor, int& calls) {
+    auto shared = exec::split(stdexec::just() | stdexec::then([&calls] {
+        ++calls;
+        return 42;
+    }));
+    const int first = co_await shared;
+    const int second = co_await shared;
+    co_return first + second;
+}
+
+TEST_CASE("split senders can be awaited repeatedly from affine tasks") {
+    manual_executor executor;
+    int calls = 0;
+    CHECK(affine::sync_wait(shared_sender_awaitable(executor, calls)) == 84);
+    CHECK(calls == 1);
+}
+
+TEST_CASE("stdexec stop adapter borrows non-copyable callbacks and owns value callbacks") {
+    struct callback {
+        int& calls;
+        std::unique_ptr<int> owned = std::make_unique<int>(1);
+        void operator()() noexcept { calls += *owned; }
+    };
+    std::stop_source source;
+    affine::detail::stdexec_stop_token token(source.get_token());
+    int borrowed_calls = 0, owned_calls = 0;
+    callback borrowed{borrowed_calls};
+    {
+        affine::detail::stdexec_stop_token::callback_type<callback&> first(token, borrowed);
+        affine::detail::stdexec_stop_token::callback_type<callback> second(token, callback{owned_calls});
+        source.request_stop();
+        CHECK(borrowed_calls == 1);
+        CHECK(owned_calls == 1);
+    }
+    CHECK(borrowed.owned != nullptr);
 }
 
 TEST_CASE("asynchronous stdexec senders return to the affine executor") {
