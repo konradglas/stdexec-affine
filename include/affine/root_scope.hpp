@@ -19,7 +19,7 @@ struct scoped_operation {
     virtual void start() = 0;
     virtual void request_stop() noexcept = 0;
     virtual void close_executor() noexcept = 0;
-    virtual void wait() = 0;
+    virtual void wait(bool allow_non_owner) = 0;
     [[nodiscard]] virtual bool completed() const noexcept = 0;
 };
 
@@ -43,14 +43,19 @@ public:
         }
     }
 
-    void wait() override {
+    void wait(bool allow_non_owner) override {
         const auto state = _task.state();
         if (!state)
             return;
 
         if (!state->is_completed()) {
             auto& executor = _task.executor();
-            if (executor.is_current_thread()) {
+            if (allow_non_owner) {
+                if constexpr (requires { executor.run_until([] { return true; }, true); })
+                    executor.run_until([&] { return state->is_completed(); }, true);
+                else
+                    throw std::logic_error("executor does not support joining-thread draining");
+            } else if (executor.is_current_thread()) {
                 if constexpr (drainable_executor<Executor>) {
                     executor.run_until([&] { return state->is_completed(); });
                 } else {
@@ -62,6 +67,12 @@ public:
             }
         }
 
+        // Completion is published during final_suspend. Join any callback
+        // still returning from that suspension before retiring its task frame.
+        if constexpr (requires { _task.executor().drain(true); }) {
+            if (allow_non_owner || _task.executor().is_current_thread())
+                _task.executor().drain(allow_non_owner);
+        }
         if (state->_error)
             std::rethrow_exception(state->_error);
     }
@@ -125,7 +136,7 @@ public:
             child->close(close_executors);
     }
 
-    void wait() {
+    void wait(bool allow_non_owner = false) {
         std::exception_ptr error;
 
         for (;;) {
@@ -139,7 +150,7 @@ public:
 
             for (const auto& child : children) {
                 try {
-                    child->wait();
+                    child->wait(allow_non_owner);
                 } catch (...) {
                     if (!error)
                         error = std::current_exception();
@@ -159,7 +170,7 @@ public:
         }
         if (operation) {
             try {
-                operation->wait();
+                operation->wait(allow_non_owner);
             } catch (...) {
                 if (!error)
                     error = std::current_exception();
@@ -223,14 +234,14 @@ public:
             _control->close(false);
     }
 
-    void wait() const {
+    void wait(bool allow_non_owner = false) const {
         if (_control)
-            _control->wait();
+            _control->wait(allow_non_owner);
     }
 
-    void shutdown_and_wait() const {
+    void shutdown_and_wait(bool allow_non_owner = false) const {
         close();
-        wait();
+        wait(allow_non_owner);
     }
 
     [[nodiscard]] bool completed() const noexcept {
@@ -257,11 +268,11 @@ public:
     root_scope() : _control(std::make_shared<detail::task_control>()) {}
 
     void close() const noexcept { _control->close(true); }
-    void drain() const { _control->wait(); }
+    void drain(bool allow_non_owner = false) const { _control->wait(allow_non_owner); }
 
-    void shutdown_and_wait() const {
+    void shutdown_and_wait(bool allow_non_owner = false) const {
         close();
-        drain();
+        drain(allow_non_owner);
     }
 
     [[nodiscard]] bool completed() const noexcept {

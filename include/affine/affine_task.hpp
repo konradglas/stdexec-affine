@@ -66,7 +66,9 @@ struct task_state {
     void inherit_stop_token(std::stop_token token) {
         std::lock_guard lock(_mutex);
         _parent_stop_callback.emplace(token, [this] {
-            _stop_source.request_stop();
+            // Completion can destroy this task inline during stop propagation.
+            auto source = _stop_source;
+            source.request_stop();
         });
     }
 
@@ -308,6 +310,7 @@ public:
                 _bridge.reset();
                 return false;
             }
+            return true;
         } else {
             return _awaiter.await_suspend(bridge_handle);
         }

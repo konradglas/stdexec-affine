@@ -44,7 +44,7 @@ public:
               std::move(is_current), std::move(dispatch), std::move(pump))) {}
 
     bool is_current_thread() const noexcept {
-        return _state->_is_current();
+        return _state->_is_current() || _draining == _state.get();
     }
 
     bool schedule(std::coroutine_handle<> handle) {
@@ -75,9 +75,11 @@ public:
         auto dispatched_record = record;
         try {
             dispatch([state = std::move(state), record = std::move(dispatched_record)] {
+                std::lock_guard execution(state->_execution);
                 if (record->claim()) {
                     state->remove_pending(record);
-                    record->_callback();
+                    auto callback = std::move(record->_callback);
+                    callback();
                 }
             });
         } catch (...) {
@@ -87,31 +89,36 @@ public:
         return true;
     }
 
-    void drain() {
-        if (!is_current_thread())
+    // Explicit takeover is for callers that can safely execute the entire
+    // resumed task tree on this thread (e.g. exclusive owner teardown).
+    void drain(bool allow_non_owner = false) {
+        if (!is_current_thread() && !allow_non_owner)
             throw std::logic_error("main_thread_executor must drain on its owner thread");
 
+        std::lock_guard execution(_state->_execution);
+        drain_scope scope(_state.get());
         for (;;) {
             auto record = _state->take_next();
             if (!record)
                 return;
-            record->_callback();
+            auto callback = std::move(record->_callback);
+            callback();
         }
     }
 
     template<class Predicate>
-    void run_until(Predicate&& done) {
-        if (!is_current_thread())
+    void run_until(Predicate&& done, bool allow_non_owner = false) {
+        if (!is_current_thread() && !allow_non_owner)
             throw std::logic_error("main_thread_executor must be pumped on its owner thread");
         std::function<bool()> done_function = std::forward<Predicate>(done);
         std::function<bool()> predicate = [this, &done_function] {
             return done_function() || _state->has_work();
         };
         while (!done_function()) {
-            drain();
+            drain(allow_non_owner);
             if (done_function())
                 return;
-            if (_state->_accepting.load(std::memory_order_acquire) && _state->_pump) {
+            if (_state->_is_current() && _state->_accepting.load(std::memory_order_acquire) && _state->_pump) {
                 _state->_pump(predicate);
             } else {
                 _state->wait_until_work(done_function);
@@ -129,6 +136,7 @@ public:
                     _state->_ready.push_back(std::move(record));
             }
             _state->_pending.clear();
+            _state->_dispatch = {};
         }
         _state->_condition.notify_all();
     }
@@ -158,6 +166,8 @@ private:
               _dispatch(std::move(dispatch)),
               _pump(std::move(pump)) {}
 
+        // Serializes dispatched callbacks with explicit joining-thread drains.
+        std::recursive_mutex _execution;
         current_thread_function _is_current;
         dispatch_function _dispatch;
         pump_function _pump;
@@ -210,6 +220,12 @@ private:
         }
     };
 
+    inline static thread_local state* _draining = nullptr;
+    struct drain_scope {
+        explicit drain_scope(state* value) : previous(std::exchange(_draining, value)) {}
+        ~drain_scope() { _draining = previous; }
+        state* previous;
+    };
     std::shared_ptr<state> _state;
 
     void remove_pending(const std::shared_ptr<callback_record>& record) {
