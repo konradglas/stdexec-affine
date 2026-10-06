@@ -118,7 +118,11 @@ struct environment_adapter<Promise, std::void_t<decltype(std::declval<Promise co
 };
 
 template<class Sender, class Promise>
-    requires stdexec::sender<Sender>
+    // stdexec also recognizes native coroutine awaitables as senders. Keep
+    // those on affine_task's ordinary awaiter path (e.g. libcoro::task).
+    requires stdexec::sender<Sender> && (!requires(Sender&& value) {
+        get_awaiter(std::move(value)).await_resume();
+    })
 struct awaitable_adapter<Sender, Promise> {
     static constexpr bool customized = true;
     static constexpr bool preserves_affinity = true;
