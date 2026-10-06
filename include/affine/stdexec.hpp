@@ -19,7 +19,7 @@ public:
         // Defer invocation through a wrapper, preserving references and owning values.
         struct callback_wrapper {
             Callback callback;
-            void operator()() noexcept { callback(); }
+            void operator()() noexcept { std::forward<Callback>(callback)(); }
         };
 
     public:
