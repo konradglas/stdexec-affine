@@ -7,6 +7,9 @@ include(CTest)
 add_library(stdexec_affine INTERFACE)
 add_library(stdexec_affine::affine ALIAS stdexec_affine)
 target_compile_features(stdexec_affine INTERFACE cxx_std_20)
+if(MSVC)
+  target_compile_options(stdexec_affine INTERFACE /Zc:preprocessor)
+endif()
 target_include_directories(stdexec_affine INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>)
@@ -29,7 +32,7 @@ if(STDEXEC_AFFINE_BUILD_TESTS)
   )
   FetchContent_MakeAvailable(doctest)
 
-  add_executable(stdexec_affine_tests tests/affine_task_test.cpp)
+  add_executable(stdexec_affine_tests tests/affine_task_test.cpp tests/stop_token_test.cpp)
   target_link_libraries(stdexec_affine_tests PRIVATE stdexec_affine::affine doctest::doctest)
   target_compile_features(stdexec_affine_tests PRIVATE cxx_std_20)
   if(STDEXEC_AFFINE_STDEXEC_SOURCE_DIR)

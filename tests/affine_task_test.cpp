@@ -13,10 +13,12 @@
 #  include <exec/task.hpp>
 #endif
 
+#include <atomic>
 #include <condition_variable>
 #include <deque>
 #include <memory>
 #include <thread>
+#include <vector>
 
 class host_queue {
 public:
@@ -561,7 +563,7 @@ TEST_CASE("stdexec stop adapter borrows non-copyable callbacks and owns value ca
         std::unique_ptr<int> owned = std::make_unique<int>(1);
         void operator()() noexcept { calls += *owned; }
     };
-    std::stop_source source;
+    affine::stop_source source;
     affine::detail::stdexec_stop_token token(source.get_token());
     int borrowed_calls = 0, owned_calls = 0;
     callback borrowed{borrowed_calls};
@@ -625,5 +627,25 @@ TEST_CASE("root scope drains a foreign task back onto the affine executor") {
     CHECK(resumed_on_owner);
     CHECK_FALSE(executor.accepting());
     CHECK(host.empty());
+}
+#endif
+
+#if defined(AFFINE_TEST_HAS_STDEXEC)
+TEST_CASE("stdexec run loop wakes for concurrent producers") {
+    exec::single_thread_context worker;
+    std::atomic<int> completed{0};
+    std::vector<std::thread> producers;
+    for (int producer = 0; producer < 4; ++producer) {
+        producers.emplace_back([&] {
+            for (int item = 0; item < 500; ++item) {
+                stdexec::sync_wait(stdexec::schedule(worker.get_scheduler()));
+                ++completed;
+            }
+        });
+    }
+    for (auto& producer : producers) {
+        producer.join();
+    }
+    CHECK(completed.load() == 2000);
 }
 #endif

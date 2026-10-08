@@ -169,6 +169,16 @@ observing the token. If an operation completes with stop, `sync_wait()` throws
 `affine::operation_cancelled`; use stdexec's `stopped_as_optional` when stop
 should instead become a value such as `std::nullopt`.
 
+`affine/stop_token.hpp` provides `affine::stop_token`, `stop_source`, and
+`stop_callback`. They alias the standard types where supported. macOS deployment
+targets before 11 use a shared stop state and callback implementation without
+newer libc++ runtime dependencies. Callbacks run synchronously on cancellation;
+unregistration waits for an invocation on another thread and permits self-removal.
+
+Define `AFFINE_USE_PORTABLE_STOP_TOKEN=1` consistently across a target to test the
+portable implementation on newer systems. The stdexec integration additionally
+needs a stdexec build with an atomic-wait fallback for older macOS.
+
 ## Status
 
 Early development. The executor contract and shutdown API may evolve before

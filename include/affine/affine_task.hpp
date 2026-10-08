@@ -8,7 +8,7 @@
 #include <mutex>
 #include <optional>
 #include <stdexcept>
-#include <stop_token>
+#include <affine/stop_token.hpp>
 #include <type_traits>
 #include <utility>
 
@@ -60,10 +60,10 @@ struct task_state {
     bool _completed = false;
     completion_status _status = completion_status::running;
     std::exception_ptr _error;
-    std::stop_source _stop_source;
-    std::optional<std::stop_callback<std::function<void()>>> _parent_stop_callback;
+    affine::stop_source _stop_source;
+    std::optional<affine::stop_callback<std::function<void()>>> _parent_stop_callback;
 
-    void inherit_stop_token(std::stop_token token) {
+    void inherit_stop_token(affine::stop_token token) {
         std::lock_guard lock(_mutex);
         _parent_stop_callback.emplace(token, [this] {
             // Completion can destroy this task inline during stop propagation.
@@ -119,11 +119,11 @@ public:
 };
 
 struct stop_token_awaitable {
-    std::stop_token _token;
+    affine::stop_token _token;
 
     bool await_ready() const noexcept { return true; }
     void await_suspend(std::coroutine_handle<>) const noexcept {}
-    std::stop_token await_resume() const noexcept { return _token; }
+    affine::stop_token await_resume() const noexcept { return _token; }
 };
 
 template<class T>
@@ -138,7 +138,7 @@ template<class T>
 struct task_promise_base : result_storage<T> {
     std::shared_ptr<task_state> _state = std::make_shared<task_state>();
 
-    [[nodiscard]] std::stop_token stop_token() const noexcept {
+    [[nodiscard]] affine::stop_token stop_token() const noexcept {
         return _state->_stop_source.get_token();
     }
 
@@ -231,16 +231,16 @@ template<class Executor>
 struct continuation_bridge<Executor>::promise_type {
     Executor _executor;
     std::coroutine_handle<> _continuation{};
-    std::stop_token _stop_token;
+    affine::stop_token _stop_token;
 
     promise_type(Executor executor,
                  std::coroutine_handle<> continuation,
-                 std::stop_token stop_token)
+                 affine::stop_token stop_token)
         : _executor(std::move(executor)),
           _continuation(continuation),
           _stop_token(stop_token) {}
 
-    [[nodiscard]] std::stop_token stop_token() const noexcept {
+    [[nodiscard]] affine::stop_token stop_token() const noexcept {
         return _stop_token;
     }
 
@@ -273,7 +273,7 @@ template<class Executor>
 continuation_bridge<Executor> make_continuation_bridge(
     Executor executor,
     std::coroutine_handle<> continuation,
-    std::stop_token stop_token) {
+    affine::stop_token stop_token) {
     co_return;
 }
 
@@ -287,7 +287,7 @@ class affine_awaitable {
 public:
     affine_awaitable(Awaitable&& awaitable,
                      Executor executor,
-                     std::stop_token stop_token)
+                     affine::stop_token stop_token)
         : _awaitable(std::forward<Awaitable>(awaitable)),
           _awaiter(get_awaiter(std::move(_awaitable).get())),
           _executor(std::move(executor)),
@@ -324,7 +324,7 @@ private:
     storage_type _awaitable;
     awaiter_type _awaiter;
     Executor _executor;
-    std::stop_token _stop_token;
+    affine::stop_token _stop_token;
     std::optional<bridge_type> _bridge;
 };
 
@@ -387,16 +387,16 @@ public:
         return _handle ? _handle.promise()._state : nullptr;
     }
 
-    [[nodiscard]] std::stop_token stop_token() const noexcept {
+    [[nodiscard]] affine::stop_token stop_token() const noexcept {
         return _handle ? _handle.promise()._state->_stop_source.get_token()
-                       : std::stop_token{};
+                       : affine::stop_token{};
     }
 
     bool request_stop() noexcept {
         return _handle && _handle.promise()._state->_stop_source.request_stop();
     }
 
-    void inherit_stop_token(std::stop_token token) {
+    void inherit_stop_token(affine::stop_token token) {
         if (_handle)
             _handle.promise()._state->inherit_stop_token(token);
     }
@@ -540,16 +540,16 @@ public:
         return _handle ? _handle.promise()._state : nullptr;
     }
 
-    [[nodiscard]] std::stop_token stop_token() const noexcept {
+    [[nodiscard]] affine::stop_token stop_token() const noexcept {
         return _handle ? _handle.promise()._state->_stop_source.get_token()
-                       : std::stop_token{};
+                       : affine::stop_token{};
     }
 
     bool request_stop() noexcept {
         return _handle && _handle.promise()._state->_stop_source.request_stop();
     }
 
-    void inherit_stop_token(std::stop_token token) {
+    void inherit_stop_token(affine::stop_token token) {
         if (_handle)
             _handle.promise()._state->inherit_stop_token(token);
     }

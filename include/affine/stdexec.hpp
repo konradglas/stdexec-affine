@@ -31,11 +31,11 @@ public:
         : callback_type(token, Callback{ source }) {}
 
     private:
-        std::stop_callback<callback_wrapper> _callback;
+        affine::stop_callback<callback_wrapper> _callback;
     };
 
     stdexec_stop_token() noexcept = default;
-    explicit stdexec_stop_token(std::stop_token token) noexcept
+    explicit stdexec_stop_token(affine::stop_token token) noexcept
     : _token(std::move(token)) {}
 
     [[nodiscard]] bool stop_requested() const noexcept { return _token.stop_requested(); }
@@ -45,7 +45,7 @@ public:
     friend bool operator==(const stdexec_stop_token&, const stdexec_stop_token&) = default;
 
 private:
-    std::stop_token _token;
+    affine::stop_token _token;
 };
 
 template<class Executor>
