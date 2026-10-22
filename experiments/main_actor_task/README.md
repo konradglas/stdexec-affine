@@ -36,6 +36,29 @@ with `_THE_SCHEDULER_IN_THE_CURRENT_EXECUTION_ENVIRONMENT_IS_NOT_INFALLIBLE_`.
 Cancellation still works: awaited operations complete with stopped as
 usual; only the hop back to main always goes through.
 
+## Owning tasks: `root_scope` and `task_handle`
+
+`task_scope.h` gives `MainActorTask` (`main_actor_task.h`) the ownership model of
+`include/affine/root_scope.hpp`:
+
+```cpp
+root_scope scope(wakeup, onError);           // owns the MainThreadLoop
+task_handle loading = spawn(load(), scope);  // starts on main
+loading.close();                             // request stop; never waits
+loading.completed();
+scope.shutdown_and_wait();                   // the only wait: stop all, join, drain main
+```
+
+- `close()` only requests stop. A stopped `co_await` unwinds the task; RAII
+  cleanup runs on main.
+- `shutdown_and_wait()` joins on the owner thread by draining the loop's own
+  queue, so it never needs the host message loop.
+- An exception escaping a spawned task goes to `onError` (default: `std::cerr`).
+- `spawn` may be called from any thread; after shutdown a task is dropped
+  unstarted and its handle is completed.
+
+`task_scope_tests.cpp` checks these.
+
 ## Build
 
 Tested against the stdexec pinned in `ADC_Coroutine_demo/third_party/stdexec`.
@@ -44,4 +67,5 @@ Tested against the stdexec pinned in `ADC_Coroutine_demo/third_party/stdexec`.
 STDEXEC=/path/to/stdexec/include
 clang++ -std=c++20 -I. -isystem $STDEXEC proto.cpp -o proto && ./proto
 clang++ -std=c++20 -I. -isystem $STDEXEC nested.cpp -o nested && ./nested
+clang++ -std=c++20 -I. -isystem $STDEXEC task_scope_tests.cpp -o task_scope_tests && ./task_scope_tests
 ```
