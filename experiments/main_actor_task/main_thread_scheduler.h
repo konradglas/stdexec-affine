@@ -11,6 +11,7 @@
 #include <thread>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace playground {
 
@@ -31,8 +32,10 @@ class MainThreadLoop {
             ~CurrentGuard() { current = previous; }
             State* previous;
         };
-        explicit State(Wakeup wakeup)
-        : wakeup(std::move(wakeup)), owner(std::this_thread::get_id()) {}
+        explicit State(Wakeup wakeup, std::shared_ptr<State> parent = nullptr)
+        : wakeup(std::move(wakeup)),
+          owner(parent ? parent->owner : std::this_thread::get_id()),
+          parent(std::move(parent)) {}
 
         ~State() { assert(head == nullptr); }
 
@@ -55,11 +58,59 @@ class MainThreadLoop {
             }
             if (needsWakeup) {
                 condition.notify_one();
-                // Platform callbacks do not own the loop or pending operations.
+                // Waits on an ancestor drain this domain too.
+                for (auto* ancestor = parent.get(); ancestor; ancestor = ancestor->parent.get())
+                    ancestor->descendantReady();
+                // Platform callbacks do not own the loop or pending operations. Each domain
+                // posts for itself, so they pump only their own queue.
                 wakeup([weak = weak_from_this()] {
                     if (auto state = weak.lock())
-                        state->drain();
+                        state->drainQueue();
                 });
+            }
+        }
+
+        void descendantReady() noexcept {
+            {
+                std::lock_guard lock(mutex);
+                childReady = true;
+            }
+            condition.notify_one();
+        }
+
+        bool hasWork() {
+            std::lock_guard lock(mutex);
+            return head != nullptr || childReady;
+        }
+
+        std::vector<std::shared_ptr<State>> childrenWithWork() {
+            std::vector<std::shared_ptr<State>> ready;
+            std::lock_guard lock(mutex);
+            childReady = false;
+            std::erase_if(children, [&](const std::weak_ptr<State>& weak) {
+                auto child = weak.lock();
+                if (!child)
+                    return true;
+                if (child->hasWork())
+                    ready.push_back(std::move(child));
+                return false;
+            });
+            return ready;
+        }
+
+        // Runs this queue and every descendant domain's queue, never a sibling's,
+        // until all of them are empty.
+        std::size_t executeTree() {
+            std::size_t count = 0;
+            for (;;) {
+                std::size_t round = executeReady();
+                for (auto& child : childrenWithWork()) {
+                    PumpGuard guard(*child, true);
+                    round += child->executeTree();
+                }
+                if (round == 0)
+                    return count;
+                count += round;
             }
         }
 
@@ -99,18 +150,23 @@ class MainThreadLoop {
             CurrentGuard current;
         };
 
-        std::size_t drain() {
+        std::size_t drainQueue() {
             PumpGuard guard(*this);
             return executeReady();
+        }
+
+        std::size_t drain() {
+            PumpGuard guard(*this);
+            return executeTree();
         }
 
         void run() {
             PumpGuard guard(*this);
             for (;;) {
-                executeReady();
+                executeTree();
                 std::unique_lock lock(mutex);
-                condition.wait(lock, [this] { return finished || head != nullptr; });
-                if (finished && head == nullptr)
+                condition.wait(lock, [this] { return finished || head != nullptr || childReady; });
+                if (finished && head == nullptr && !childReady)
                     return;
             }
         }
@@ -125,12 +181,15 @@ class MainThreadLoop {
 
         Wakeup wakeup;
         const std::thread::id owner;
+        const std::shared_ptr<State> parent;
         // Serializes owner callbacks, inline scheduling and joining-thread takeover.
         std::recursive_mutex execution;
         std::mutex mutex;
         std::condition_variable condition;
         Task* head = nullptr;
         Task* tail = nullptr;
+        std::vector<std::weak_ptr<State>> children;
+        bool childReady = false; // Some descendant domain has queued work.
         bool finished = false;
         bool pumping = false; // Protected by execution.
     };
@@ -244,9 +303,11 @@ public:
     auto get_enqueue_scheduler() const noexcept -> Scheduler { return Scheduler{state, true}; }
     // Separate continuation queue, same physical owner and platform dispatcher.
     // The returned sender's scheduler retains the domain state in its operation.
+    // The domain is a child of this one: draining or waiting here also pumps it,
+    // while waiting on the domain pumps only it and its own children. It inherits
+    // the owner thread, so it may be created on any thread.
     auto make_domain() const -> std::unique_ptr<MainThreadLoop> {
-        state->requireOwner();
-        return std::make_unique<MainThreadLoop>(state->wakeup);
+        return std::unique_ptr<MainThreadLoop>(new MainThreadLoop(state));
     }
     template<class Sender>
     auto bind(Sender&& sender) const {
@@ -277,11 +338,11 @@ public:
             WaitReceiver{error, completed, done});
         stdexec::start(operation);
         while (!done) {
-            state->executeReady();
+            state->executeTree();
             if (done)
                 break;
             std::unique_lock lock(state->mutex);
-            state->condition.wait(lock, [&] { return state->head != nullptr; });
+            state->condition.wait(lock, [&] { return state->head != nullptr || state->childReady; });
         }
         if (error)
             std::rethrow_exception(error);
@@ -289,6 +350,12 @@ public:
     }
 
 private:
+    explicit MainThreadLoop(std::shared_ptr<State> parent)
+    : state(std::make_shared<State>(parent->wakeup, parent)) {
+        std::lock_guard lock(parent->mutex);
+        parent->children.push_back(state);
+    }
+
     std::shared_ptr<State> state;
 };
 

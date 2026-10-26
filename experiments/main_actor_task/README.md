@@ -39,29 +39,47 @@ usual; only the hop back to main always goes through.
 ## Owning tasks: `root_scope` and `task_handle`
 
 `task_scope.h` gives `MainActorTask` (`main_actor_task.h`) the ownership model of
-`include/affine/root_scope.hpp`:
+`include/affine/root_scope.hpp`, as a tree:
 
 ```cpp
-root_scope scope(wakeup, onError);           // owns the MainThreadLoop
-task_handle loading = spawn(load(), scope);  // starts on main
-loading.close();                             // request stop; never waits
-loading.completed();
-scope.shutdown_and_wait();                   // the only wait: stop all, join, drain main
+root_scope scope(wakeup, onError);              // owns the MainThreadLoop
+task_handle loading = spawn(load(), scope);     // starts on main
+task_handle preset = spawn(loadPreset(), loading); // a child of loading
+loading.close();                                // request stop for loading and preset; never waits
+loading.shutdown_and_wait();                    // stop, join loading and preset, pump only their queues
+scope.shutdown_and_wait();                      // stop all, join, drain main
 ```
 
-- `close()` only requests stop. A stopped `co_await` unwinds the task; RAII
-  cleanup runs on main.
-- `shutdown_and_wait()` joins on the owner thread by draining the loop's own
-  queue, so it never needs the host message loop.
+- Every spawned task gets its own queue, a child domain of its parent's
+  (`MainThreadLoop::make_domain`). Waiting on a node drains its own queue and its
+  descendants', never a sibling's or an ancestor's, so joining the loading task in
+  the middle of `load()` runs nothing unrelated.
+- A task is counted in its own scope and in every ancestor's, and stop flows down
+  from each node to its children: waiting on a node joins exactly its subtree, and
+  `scope.shutdown_and_wait()` needs no handle waited first.
+- `wait(true)` lets another thread take the subtree over while the owner is blocked.
+- Handles can be copied and dropped freely; a parent keeps its children until its
+  own wait joins them.
 - An exception escaping a spawned task goes to `onError` (default: `std::cerr`).
-- `spawn` may be called from any thread; after shutdown a task is dropped
-  unstarted and its handle is completed.
+- `spawn` may be called from any thread; once the parent has been joined a task is
+  dropped unstarted and its handle is completed.
 
-`task_scope_tests.cpp` checks these.
+Continuations on main still complete inline when they are already on main; only
+work arriving from other threads is queued.
+
+Tasks see their node's plain `inplace_stop_token`. Do not nest stop-forwarding
+scopes around a `MainActorTask` (`associate` into one scope, `spawn` into another):
+that fuses the tokens, `stdexec::task` then keeps its own stop source in its frame,
+and a stop that completes the task inline on main frees that source while its
+`request_stop()` is still running. A `counting_scope` used directly is fine.
+
+`task_scope_tests.cpp` checks these, including the two hand-off hazards fixed in
+`main_thread_executor` (a waiting owner running continuations as they are queued,
+and a joining thread retiring a task as soon as it completes).
 
 ## Build
 
-Tested against the stdexec pinned in `ADC_Coroutine_demo/third_party/stdexec`.
+Tested against the stdexec vendored in `stdexec-main-thread-playground` (`vendor/stdexec/REVISION`).
 
 ```sh
 STDEXEC=/path/to/stdexec/include
