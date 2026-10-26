@@ -52,29 +52,31 @@ public:
     }
 
     bool schedule_callback(std::function<void()> callback) {
+        // Once the record is pending, a draining thread may run it before this
+        // returns, and the continuation it resumes may destroy this executor
+        // copy (e.g. the one in an awaiter's frame). Work only through locals.
+        auto state = _state;
         dispatch_function dispatch;
         auto record = std::make_shared<callback_record>(std::move(callback));
         {
-            std::lock_guard lock(_state->_mutex);
-            if (!_state->_accepting) {
-                _state->_ready.push_back(std::move(record));
-                _state->_condition.notify_all();
+            std::lock_guard lock(state->_mutex);
+            if (!state->_accepting) {
+                state->_ready.push_back(std::move(record));
+                state->_condition.notify_all();
                 return true;
             }
-            dispatch = _state->_dispatch;
-            _state->_pending.push_back(record);
+            dispatch = state->_dispatch;
+            state->_pending.push_back(record);
         }
-        _state->_condition.notify_all();
+        state->_condition.notify_all();
 
         if (!dispatch) {
-            remove_pending(record);
+            state->remove_pending(record);
             return false;
         }
 
-        auto state = _state;
-        auto dispatched_record = record;
         try {
-            dispatch([state = std::move(state), record = std::move(dispatched_record)] {
+            dispatch([state, record] {
                 std::lock_guard execution(state->_execution);
                 if (record->claim()) {
                     state->remove_pending(record);
@@ -83,7 +85,7 @@ public:
                 }
             });
         } catch (...) {
-            remove_pending(record);
+            state->remove_pending(record);
             return false;
         }
         return true;
@@ -95,50 +97,49 @@ public:
         if (!is_current_thread() && !allow_non_owner)
             throw std::logic_error("main_thread_executor must drain on its owner thread");
 
-        std::lock_guard execution(_state->_execution);
-        drain_scope scope(_state.get());
-        for (;;) {
-            auto record = _state->take_next();
-            if (!record)
-                return;
-            auto callback = std::move(record->_callback);
-            callback();
-        }
+        // Callbacks may destroy this executor copy.
+        auto state = _state;
+        state->drain();
     }
 
     template<class Predicate>
     void run_until(Predicate&& done, bool allow_non_owner = false) {
         if (!is_current_thread() && !allow_non_owner)
             throw std::logic_error("main_thread_executor must be pumped on its owner thread");
+        // Callbacks may destroy this executor copy.
+        auto state = _state;
         std::function<bool()> done_function = std::forward<Predicate>(done);
-        std::function<bool()> predicate = [this, &done_function] {
-            return done_function() || _state->has_work();
+        std::function<bool()> predicate = [&state, &done_function] {
+            return done_function() || state->has_work();
         };
         while (!done_function()) {
-            drain(allow_non_owner);
+            state->drain();
             if (done_function())
                 return;
-            if (_state->_is_current() && _state->_accepting.load(std::memory_order_acquire) && _state->_pump) {
-                _state->_pump(predicate);
+            if (state->_is_current() && state->_accepting.load(std::memory_order_acquire) && state->_pump) {
+                state->_pump(predicate);
             } else {
-                _state->wait_until_work(done_function);
+                state->wait_until_work(done_function);
             }
         }
     }
 
     void close() noexcept {
+        // Once records are ready, a draining thread may run them and destroy
+        // this executor copy.
+        auto state = _state;
         {
-            std::lock_guard lock(_state->_mutex);
-            if (!_state->_accepting.exchange(false, std::memory_order_acq_rel))
+            std::lock_guard lock(state->_mutex);
+            if (!state->_accepting.exchange(false, std::memory_order_acq_rel))
                 return;
-            for (auto& record : _state->_pending) {
+            for (auto& record : state->_pending) {
                 if (record->claim())
-                    _state->_ready.push_back(std::move(record));
+                    state->_ready.push_back(std::move(record));
             }
-            _state->_pending.clear();
-            _state->_dispatch = {};
+            state->_pending.clear();
+            state->_dispatch = {};
         }
-        _state->_condition.notify_all();
+        state->_condition.notify_all();
     }
 
     [[nodiscard]] bool accepting() const noexcept {
@@ -218,6 +219,18 @@ private:
             std::lock_guard lock(_mutex);
             std::erase(_pending, record);
         }
+
+        void drain() {
+            std::lock_guard execution(_execution);
+            drain_scope scope(this);
+            for (;;) {
+                auto record = take_next();
+                if (!record)
+                    return;
+                auto callback = std::move(record->_callback);
+                callback();
+            }
+        }
     };
 
     inline static thread_local state* _draining = nullptr;
@@ -227,10 +240,6 @@ private:
         state* previous;
     };
     std::shared_ptr<state> _state;
-
-    void remove_pending(const std::shared_ptr<callback_record>& record) {
-        _state->remove_pending(record);
-    }
 };
 
 static_assert(executor<main_thread_executor>);

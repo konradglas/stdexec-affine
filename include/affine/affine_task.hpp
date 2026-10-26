@@ -255,11 +255,15 @@ struct continuation_bridge<Executor>::promise_type {
         bool await_ready() const noexcept { return false; }
         std::coroutine_handle<> await_suspend(handle_type handle) const noexcept {
             auto& promise = handle.promise();
-            if (!promise._continuation)
+            // The scheduled continuation may finish its co_await and destroy
+            // this frame before schedule() returns.
+            auto continuation = promise._continuation;
+            if (!continuation)
                 return std::noop_coroutine();
-            if (promise._executor.is_current_thread())
-                return promise._continuation;
-            if (!promise._executor.schedule(promise._continuation))
+            auto executor = promise._executor;
+            if (executor.is_current_thread())
+                return continuation;
+            if (!executor.schedule(continuation))
                 std::terminate();
             return std::noop_coroutine();
         }
@@ -675,13 +679,18 @@ struct affine_task<T, Executor>::promise_type : detail::task_promise_base<T> {
         bool await_ready() const noexcept { return false; }
         std::coroutine_handle<> await_suspend(handle_type handle) const noexcept {
             auto& promise = handle.promise();
-            promise._state->complete(promise._state->_error);
-            if (!promise._continuation)
+            // Once completion is published a joining thread may destroy this
+            // frame, and a scheduled continuation may do so before schedule()
+            // returns.
+            auto state = promise._state;
+            auto continuation = promise._continuation;
+            auto executor = promise._executor;
+            state->complete(state->_error);
+            if (!continuation)
                 return std::noop_coroutine();
-            auto& executor = *promise._executor;
-            if (executor.is_current_thread())
-                return promise._continuation;
-            if (!executor.schedule(promise._continuation))
+            if (executor->is_current_thread())
+                return continuation;
+            if (!executor->schedule(continuation))
                 std::terminate();
             return std::noop_coroutine();
         }
@@ -766,13 +775,18 @@ struct affine_task<void, Executor>::promise_type : detail::task_promise_base<voi
         bool await_ready() const noexcept { return false; }
         std::coroutine_handle<> await_suspend(handle_type handle) const noexcept {
             auto& promise = handle.promise();
-            promise._state->complete(promise._state->_error);
-            if (!promise._continuation)
+            // Once completion is published a joining thread may destroy this
+            // frame, and a scheduled continuation may do so before schedule()
+            // returns.
+            auto state = promise._state;
+            auto continuation = promise._continuation;
+            auto executor = promise._executor;
+            state->complete(state->_error);
+            if (!continuation)
                 return std::noop_coroutine();
-            auto& executor = *promise._executor;
-            if (executor.is_current_thread())
-                return promise._continuation;
-            if (!executor.schedule(promise._continuation))
+            if (executor->is_current_thread())
+                return continuation;
+            if (!executor->schedule(continuation))
                 std::terminate();
             return std::noop_coroutine();
         }

@@ -223,6 +223,30 @@ affine::affine_task<void, Executor> scoped_arbitrary_awaitable(
     resumed_on_owner = executor.is_current_thread();
 }
 
+struct resume_on {
+    affine::serial_executor executor;
+
+    bool await_ready() const noexcept { return false; }
+
+    void await_suspend(std::coroutine_handle<> continuation) {
+        if (!executor.schedule(continuation))
+            throw std::runtime_error("worker rejected continuation");
+    }
+
+    void await_resume() const noexcept {}
+};
+
+affine::affine_task<void, affine::main_thread_executor> hop_through_worker(
+    affine::main_thread_executor executor,
+    affine::serial_executor worker,
+    int hops,
+    int& completed_hops) {
+    for (int hop = 0; hop < hops; ++hop) {
+        co_await resume_on{worker};
+        ++completed_hops;
+    }
+}
+
 TEST_CASE("sync_wait drives the affine executor on its owner thread") {
     manual_executor executor;
     CHECK(affine::sync_wait(answer(executor)) == 42);
@@ -480,6 +504,53 @@ TEST_CASE("main thread executor drains claimed callbacks on its owner thread") {
 
     CHECK(ran);
     CHECK(task.done());
+}
+
+// The owner waits in a joining-thread drain while a worker schedules each
+// continuation back onto it. Resuming the continuation finishes its co_await
+// and frees the bridge frame holding the executor copy that schedule() was
+// called on, possibly before schedule() returns. ASan catches it reliably.
+TEST_CASE("main thread executor does not touch a scheduling copy after publishing") {
+    host_queue host;
+    affine::main_thread_executor executor(
+        std::this_thread::get_id(),
+        [&](std::function<void()> callback) { host.enqueue(std::move(callback)); });
+    affine::single_thread_context worker;
+    auto root = affine::create_root_scope();
+
+    constexpr int rounds = 100;
+    constexpr int hops = 100;
+    int completed_hops = 0;
+    for (int round = 0; round < rounds; ++round) {
+        auto loading = affine::spawn(
+            hop_through_worker(executor, worker.get_executor(), hops, completed_hops)
+                .scheduleOn(executor),
+            root);
+        loading.shutdown_and_wait(true);
+    }
+    CHECK(completed_hops == rounds * hops);
+
+    root.shutdown_and_wait();
+    host.pump_until([&] { return host.empty(); });
+    worker.shutdown_and_wait();
+}
+
+// Completion is published from final_suspend, after which the joining thread
+// may destroy the task frame and its state. ASan catches it reliably.
+TEST_CASE("a joining thread may retire a task frame once it completes") {
+    affine::single_thread_context context;
+    auto executor = context.get_executor();
+
+    constexpr int rounds = 1000;
+    int ran = 0;
+    for (int round = 0; round < rounds; ++round) {
+        bool round_ran = false;
+        affine::sync_wait(mark_ran(executor, round_ran).scheduleOn(executor));
+        ran += round_ran;
+    }
+    CHECK(ran == rounds);
+
+    context.shutdown_and_wait();
 }
 
 #if defined(AFFINE_TEST_HAS_STDEXEC)

@@ -5,6 +5,8 @@
 
 namespace affine {
 
+// `schedule` must not touch the executor object once the handle may run:
+// the caller's copy can live in the frame that the handle resumes and destroys.
 template<class E>
 concept executor = requires(E& value, std::coroutine_handle<> handle) {
     { value.is_current_thread() } -> std::same_as<bool>;
