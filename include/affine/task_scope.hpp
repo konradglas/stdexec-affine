@@ -12,20 +12,24 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
 namespace affine {
 
-// root_scope / task_handle for MainActorTask, as a tree:
+// root_scope / child_scope / task_handle for MainActorTask, as a tree:
 // every spawned task gets its own queue (a child domain of its parent's) and scope. Waiting
 // on a node stops nothing else, joins exactly its subtree and pumps only the subtree's
 // queues; the root's shutdown_and_wait stops and joins everything. Handles can be copied and
-// dropped freely: a parent keeps its children until its own wait joins them.
+// dropped freely: a parent keeps its children until its own wait joins them. A child_scope
+// is a node without a task, for an owner that spawns tasks over its lifetime.
 
 class root_scope;
+class child_scope;
 class task_handle;
 task_handle spawn(MainActorTask<void> task, const root_scope& parent);
+task_handle spawn(MainActorTask<void> task, const child_scope& parent);
 task_handle spawn(MainActorTask<void> task, const task_handle& parent);
 
 using ErrorHandler = std::function<void(std::exception_ptr)>;
@@ -135,20 +139,26 @@ public:
     }
 
     static std::shared_ptr<task_node> spawn(MainActorTask<void> task, const std::shared_ptr<task_node>& parent) {
-        auto node = std::make_shared<task_node>(parent);
-        {
-            std::lock_guard lock(parent->_mutex);
-            parent->_children.push_back(node);
-        }
+        auto node = adopt(parent);
         node->launch(std::move(task));
+        return node;
+    }
+
+    // A node without a task: its subtree is what is spawned under it.
+    static std::shared_ptr<task_node> open(const std::shared_ptr<task_node>& parent) {
+        auto node = adopt(parent);
+        node->_taskDone.store(true, std::memory_order_relaxed);
         return node;
     }
 
     void close() noexcept { stop.request_stop(); }
 
     // Joins this subtree, draining only its queues. Serial caller ownership is required
-    // per node; close and completed may run concurrently.
+    // per node; close and completed may run concurrently. A subtree an ancestor has already
+    // joined returns at once.
     void wait(bool allowNonOwnerDrain) {
+        if (_joined)
+            return;
         _loop->sync_wait(scope.join(), allowNonOwnerDrain);
         retire();
     }
@@ -168,6 +178,13 @@ public:
     void finish() noexcept { _loop->finish(); }
 
 private:
+    static std::shared_ptr<task_node> adopt(const std::shared_ptr<task_node>& parent) {
+        auto node = std::make_shared<task_node>(parent);
+        std::lock_guard lock(parent->_mutex);
+        parent->_children.push_back(node);
+        return node;
+    }
+
     void launch(MainActorTask<void> task) {
         _taskDone.store(false, std::memory_order_relaxed);
         auto lifetime = std::make_unique<Lifetime>(this);
@@ -244,7 +261,9 @@ public:
     }
 
 private:
+    friend class child_scope;
     friend task_handle spawn(MainActorTask<void> task, const root_scope& parent);
+    friend task_handle spawn(MainActorTask<void> task, const child_scope& parent);
     friend task_handle spawn(MainActorTask<void> task, const task_handle& parent);
 
     explicit task_handle(std::shared_ptr<detail::task_node> node) : _node(std::move(node)) {}
@@ -278,6 +297,7 @@ public:
     [[nodiscard]] MainThreadLoop::Scheduler scheduler() const noexcept { return _node->scheduler(); }
 
 private:
+    friend class child_scope;
     friend task_handle spawn(MainActorTask<void> task, const root_scope& parent);
 
     static void logError(std::exception_ptr error) {
@@ -294,10 +314,55 @@ private:
     bool _joined = false;
 };
 
+// A node without a task of its own, for an owner that spawns tasks over its lifetime (e.g. a
+// document that loads in the background): its tasks are stopped and joined with it, without
+// touching the rest of the tree. Destroying it shuts it down and waits. Construct, shut down
+// and destroy it on the owner (main) thread; spawn may be called from any thread.
+class child_scope {
+public:
+    explicit child_scope(const root_scope& parent) : _node(detail::task_node::open(parent._node)) {}
+
+    explicit child_scope(const task_handle& parent) {
+        if (!parent._node)
+            throw std::invalid_argument("child_scope requires a valid parent task_handle");
+        _node = detail::task_node::open(parent._node);
+    }
+
+    child_scope(const child_scope&) = delete;
+    child_scope& operator=(const child_scope&) = delete;
+
+    ~child_scope() { shutdown_and_wait(); }
+
+    // Requests stop for every task in this scope; never waits.
+    void close() const noexcept { _node->close(); }
+
+    // Joins this scope's tasks, pumping only their queues. After this, tasks spawned into
+    // the scope are dropped unstarted.
+    void wait(bool allowNonOwnerDrain = false) const { _node->wait(allowNonOwnerDrain); }
+
+    void shutdown_and_wait(bool allowNonOwnerDrain = false) const {
+        close();
+        wait(allowNonOwnerDrain);
+    }
+
+    [[nodiscard]] bool completed() const noexcept { return _node->completed(); }
+
+    [[nodiscard]] MainThreadLoop::Scheduler scheduler() const noexcept { return _node->scheduler(); }
+
+private:
+    friend task_handle spawn(MainActorTask<void> task, const child_scope& parent);
+
+    std::shared_ptr<detail::task_node> _node;
+};
+
 // Starts the task on its own queue under the parent. An exception escaping it goes to the
 // root's error handler. Once the parent has been joined the task is dropped unstarted and
 // its handle is completed.
 inline task_handle spawn(MainActorTask<void> task, const root_scope& parent) {
+    return task_handle{detail::task_node::spawn(std::move(task), parent._node)};
+}
+
+inline task_handle spawn(MainActorTask<void> task, const child_scope& parent) {
     return task_handle{detail::task_node::spawn(std::move(task), parent._node)};
 }
 

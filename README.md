@@ -39,7 +39,7 @@ completes with `set_stopped`; `stdexec::task` rejects a scheduler that does with
 Cancellation still works: awaited operations complete with stopped as
 usual; only the hop back to main always goes through.
 
-## Owning tasks: `root_scope` and `task_handle`
+## Owning tasks: `root_scope`, `child_scope` and `task_handle`
 
 `task_scope.hpp` gives `MainActorTask` an ownership model, as a tree:
 
@@ -50,6 +50,17 @@ task_handle preset = spawn(loadPreset(), loading); // a child of loading
 loading.close();                                // request stop for loading and preset; never waits
 loading.shutdown_and_wait();                    // stop, join loading and preset, pump only their queues
 scope.shutdown_and_wait();                      // stop all, join, drain main
+```
+
+An owner that spawns tasks over its lifetime, rather than being a task itself, holds a
+`child_scope`: a node without a task, under the root or under a task.
+
+```cpp
+class Document {
+  affine::child_scope loads;                    // e.g. child_scope loads{root}
+  void instrumentChanged() { spawn(loadInstrument(), loads); }
+  // ~child_scope stops and joins this document's loads only
+};
 ```
 
 - Every spawned task gets its own queue, a child domain of its parent's

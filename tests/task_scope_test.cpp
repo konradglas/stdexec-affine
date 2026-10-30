@@ -292,6 +292,75 @@ int main() {
         host.queue.drainPosts();
     }
 
+    {
+        // Each owner's child scope stops and joins only its own tasks.
+        Host host;
+        root_scope scope(host.wakeup());
+        child_scope first(scope), second(scope);
+        bool firstResumed = false, firstDestroyed = false, secondResumed = false, secondDestroyed = false;
+        auto firstTask = spawn(waitForever(timer, firstResumed, firstDestroyed), first);
+        auto secondTask = spawn(waitForever(timer, secondResumed, secondDestroyed), second);
+        first.shutdown_and_wait();
+        check(firstTask.completed() && firstDestroyed && !firstResumed && first.completed(),
+              "child_scope::shutdown_and_wait stops and joins the scope's tasks");
+        check(!secondTask.completed() && !second.completed(), "child_scope::shutdown_and_wait leaves a sibling scope running");
+        bool lateDone = false;
+        auto late = spawn(roundTrip(worker, lateDone), first);
+        check(late.completed() && !lateDone, "A task spawned into a joined child_scope never starts and is completed");
+        scope.shutdown_and_wait();
+        check(secondTask.completed() && secondDestroyed && !secondResumed,
+              "The root's shutdown_and_wait joins child scopes nobody waited on");
+        host.queue.drainPosts();
+    }
+    {
+        // Destroying a child scope shuts it down: an owner joins its tasks in its destructor.
+        Host host;
+        root_scope scope(host.wakeup());
+        bool resumed = false, destroyed = false;
+        task_handle handle;
+        {
+            child_scope owner(scope);
+            handle = spawn(waitForever(timer, resumed, destroyed), owner);
+        }
+        check(handle.completed() && destroyed && !resumed, "Destroying a child_scope stops and joins its tasks");
+        scope.shutdown_and_wait();
+        host.queue.drainPosts();
+    }
+    {
+        // A child scope outliving the root's shutdown is already joined and can still be used.
+        Host host;
+        root_scope scope(host.wakeup());
+        child_scope owner(scope);
+        bool resumed = false, destroyed = false;
+        auto handle = spawn(waitForever(timer, resumed, destroyed), owner);
+        scope.shutdown_and_wait();
+        owner.shutdown_and_wait();
+        bool done = false;
+        auto late = spawn(roundTrip(worker, done), owner);
+        check(handle.completed() && destroyed && late.completed() && !done,
+              "A child_scope joined by the root's shutdown waits at once and drops new tasks");
+        host.queue.drainPosts();
+    }
+    {
+        // A child scope under a task is joined with that task's subtree.
+        Host host;
+        root_scope scope(host.wakeup());
+        exec::single_thread_context workerParent;
+        Hop parent;
+        auto parentTask = spawn(hopAndRecord(workerParent, parent), scope);
+        child_scope owner(parentTask);
+        bool resumed = false, destroyed = false;
+        auto child = spawn(waitForever(timer, resumed, destroyed), owner);
+        parent.started.wait();
+        parentTask.close();
+        parent.release.count_down();
+        parentTask.wait();
+        check(child.completed() && destroyed && !resumed && parent.stopped,
+              "close() and wait() on a task reach a child_scope under it");
+        scope.shutdown_and_wait();
+        host.queue.drainPosts();
+    }
+
     std::cout << (failures == 0 ? "All task scope tests passed.\n" : "Task scope tests FAILED.\n");
     return failures == 0 ? 0 : 1;
 }
