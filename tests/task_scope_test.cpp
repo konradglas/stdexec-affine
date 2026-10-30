@@ -139,6 +139,13 @@ struct StopOnly {
     }
 };
 
+// Records whether the rest of the task ran inside the spawn call or on a later turn of the main loop.
+MainActorTask<void> deferToNextTurn(MainThreadLoop::Scheduler enqueue, const bool& insideSpawn, bool& ranInside, bool& ran) {
+    co_await stdexec::schedule(enqueue);
+    ranInside = insideSpawn;
+    ran = onMain();
+}
+
 MainActorTask<void> waitForStop(bool& resumed, bool& destroyed) {
     SetOnDestroy guard{destroyed};
     co_await StopOnly{};
@@ -357,6 +364,21 @@ int main() {
         parentTask.wait();
         check(child.completed() && destroyed && !resumed && parent.stopped,
               "close() and wait() on a task reach a child_scope under it");
+        scope.shutdown_and_wait();
+        host.queue.drainPosts();
+    }
+
+    {
+        // A task spawned on main runs inline up to its first hop; the enqueue scheduler defers the rest.
+        Host host;
+        root_scope scope(host.wakeup());
+        child_scope owner(scope);
+        bool insideSpawn = true, ranInside = true, ran = false;
+        auto handle = spawn(deferToNextTurn(owner.enqueue_scheduler(), insideSpawn, ranInside, ran), owner);
+        insideSpawn = false;
+        check(!ran && !handle.completed(), "schedule(enqueue_scheduler()) on main does not run inline");
+        host.pumpUntil([&] { return handle.completed(); });
+        check(ran && !ranInside, "The deferred part runs on main on a later turn");
         scope.shutdown_and_wait();
         host.queue.drainPosts();
     }

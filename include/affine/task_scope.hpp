@@ -175,6 +175,8 @@ public:
 
     [[nodiscard]] MainThreadLoop::Scheduler scheduler() const noexcept { return _loop->get_scheduler(); }
 
+    [[nodiscard]] MainThreadLoop::Scheduler enqueue_scheduler() const noexcept { return _loop->get_enqueue_scheduler(); }
+
     void finish() noexcept { _loop->finish(); }
 
 private:
@@ -296,6 +298,10 @@ public:
 
     [[nodiscard]] MainThreadLoop::Scheduler scheduler() const noexcept { return _node->scheduler(); }
 
+    // Always queues, also on the main thread: co_await schedule(enqueue_scheduler()) runs the rest of a task on a later
+    // turn of the main loop, e.g. after its caller has released its locks.
+    [[nodiscard]] MainThreadLoop::Scheduler enqueue_scheduler() const noexcept { return _node->enqueue_scheduler(); }
+
 private:
     friend class child_scope;
     friend task_handle spawn(MainActorTask<void> task, const root_scope& parent);
@@ -348,6 +354,9 @@ public:
     [[nodiscard]] bool completed() const noexcept { return _node->completed(); }
 
     [[nodiscard]] MainThreadLoop::Scheduler scheduler() const noexcept { return _node->scheduler(); }
+
+    // Always queues, also on the main thread; see root_scope::enqueue_scheduler.
+    [[nodiscard]] MainThreadLoop::Scheduler enqueue_scheduler() const noexcept { return _node->enqueue_scheduler(); }
 
 private:
     friend task_handle spawn(MainActorTask<void> task, const child_scope& parent);

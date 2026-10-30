@@ -78,7 +78,9 @@ class Document {
   dropped unstarted and its handle is completed.
 
 Continuations on main still complete inline when they are already on main; only
-work arriving from other threads is queued.
+work arriving from other threads is queued. To defer work on main to a later turn of
+the loop, e.g. until the caller has released its locks, a task awaits
+`stdexec::schedule(scope.enqueue_scheduler())`, which always queues.
 
 Tasks see their node's plain `inplace_stop_token`. Do not nest stop-forwarding
 scopes around a `MainActorTask` (`associate` into one scope, `spawn` into another):
