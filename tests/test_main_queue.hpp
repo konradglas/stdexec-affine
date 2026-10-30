@@ -6,7 +6,7 @@
 #include <mutex>
 #include <utility>
 
-namespace playground {
+namespace affine {
 
 // Simulates dispatch_async(main) or a Windows message queue for the console host.
 class TestMainQueue {
@@ -50,4 +50,4 @@ private:
     std::deque<std::function<void()>> callbacks;
 };
 
-} // namespace playground
+} // namespace affine

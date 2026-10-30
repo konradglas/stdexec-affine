@@ -1,185 +1,101 @@
 # stdexec-affine
 
-Drain executor-affine C++20 coroutines from the executor's own thread without
-deadlocking.
-
-The central abstraction is a **drainable executor**. A thread may synchronously
-wait for work that resumes on that same thread because it does not block; it
-cooperatively executes the executor's queued continuations until the task is
-complete.
-
-```text
-executor thread starts an affine task
-    -> task awaits background work
-    -> background work queues the continuation on the executor
-    -> executor thread drains and resumes that continuation itself
-    -> task completes
-```
-
-The primary use case is a DLL or dylib driven by a host-owned main/message
-thread. The library has no application `main()` and no direct control over the
-host's message queue, yet initialization, callbacks, and teardown all happen
-on that thread. Audio plug-ins are the clearest example: teardown must finish
-synchronously before the host may unload the plug-in, even when outstanding
-coroutines need to return to the message thread first.
-
-## Execution model
-
-An `affine::executor` provides sticky execution: task bodies and continuations
-return to that executor. A task may still await work on a thread pool or any
-other execution context.
-
-An `affine::drainable_executor` additionally provides both operations needed
-for same-thread synchronous waiting:
+Main-thread affine coroutines on `stdexec::task` (the C++26 `std::execution::task`
+implementation): a task body runs on the main thread, `co_await`s work anywhere,
+and resumes on the main thread after every `co_await` by itself.
 
 ```cpp
-executor.drain();
-executor.run_until(predicate);
+struct MainEnv {
+  using start_scheduler_type = affine::MainThreadLoop::Scheduler;
+};
+template <class T = void> using MainActorTask = stdexec::task<T, MainEnv>;
 ```
 
-`drain()` executes work already claimed for local execution. `run_until()`
-may also claim callbacks already submitted to the host, then keeps draining
-until the predicate is true. This works while the executor remains open and
-does not require direct access to the host queue.
+`include/affine/main_actor_task.hpp` defines `MainActorTask`,
+`include/affine/main_thread_scheduler.hpp` the `MainThreadLoop` it runs on, and
+`include/affine/task_scope.hpp` the ownership model below.
 
-The generic task type is:
+The earlier `affine_task` / `main_thread_executor` library is no longer developed;
+it is kept on the `deprecated/affine-task` branch (tag `affine-task-final`).
+
+## Behaviour
+
+- `examples/round_trip.cpp`: starts on main, `co_await`s worker work, comes back to
+  main by itself. No explicit hop back to main is needed.
+- Starting a `MainActorTask` without a main scheduler in the environment
+  (e.g. plain `stdexec::sync_wait`) does not compile.
+- `examples/nested.cpp`: a plain `stdexec::task` cannot `co_await` a `MainActorTask`
+  directly (compile error: its scheduler is type-erased). It works with
+  `co_await stdexec::starts_on(loop.get_scheduler(), mainTask())`.
+  Build with `-DDIRECT` to see the error.
+
+## The catch
+
+`stdexec::task` only resumes on schedulers whose schedule sender is
+infallible (`set_value_t()` only). The `MainThreadLoop` scheduler therefore never
+completes with `set_stopped`; `stdexec::task` rejects a scheduler that does with
+`_THE_SCHEDULER_IN_THE_CURRENT_EXECUTION_ENVIRONMENT_IS_NOT_INFALLIBLE_`.
+
+Cancellation still works: awaited operations complete with stopped as
+usual; only the hop back to main always goes through.
+
+## Owning tasks: `root_scope` and `task_handle`
+
+`task_scope.hpp` gives `MainActorTask` an ownership model, as a tree:
 
 ```cpp
-#include <affine/affine_task.hpp>
-
-affine::affine_task<T, Executor>
+root_scope scope(wakeup, onError);              // owns the MainThreadLoop
+task_handle loading = spawn(load(), scope);     // starts on main
+task_handle preset = spawn(loadPreset(), loading); // a child of loading
+loading.close();                                // request stop for loading and preset; never waits
+loading.shutdown_and_wait();                    // stop, join loading and preset, pump only their queues
+scope.shutdown_and_wait();                      // stop all, join, drain main
 ```
 
-Tasks are lazy. An unbound child task with the same executor type inherits its
-parent's executor. Use `scheduleOn()` only to choose a root executor or to make
-an intentional affinity change:
+- Every spawned task gets its own queue, a child domain of its parent's
+  (`MainThreadLoop::make_domain`). Waiting on a node drains its own queue and its
+  descendants', never a sibling's or an ancestor's, so joining the loading task in
+  the middle of `load()` runs nothing unrelated.
+- A task is counted in its own scope and in every ancestor's, and stop flows down
+  from each node to its children: waiting on a node joins exactly its subtree, and
+  `scope.shutdown_and_wait()` needs no handle waited first.
+- `wait(true)` lets another thread take the subtree over while the owner is blocked.
+- Handles can be copied and dropped freely; a parent keeps its children until its
+  own wait joins them.
+- An exception escaping a spawned task goes to `onError` (default: `std::cerr`).
+- `spawn` may be called from any thread; once the parent has been joined a task is
+  dropped unstarted and its handle is completed.
 
-```cpp
-co_await child();                         // inherit the parent executor
-co_await child().scheduleOn(other);       // run child on other, return to parent
+Continuations on main still complete inline when they are already on main; only
+work arriving from other threads is queued.
 
-auto root = affine::spawn(
-    root_task().scheduleOn(executor), root_scope);
+Tasks see their node's plain `inplace_stop_token`. Do not nest stop-forwarding
+scopes around a `MainActorTask` (`associate` into one scope, `spawn` into another):
+that fuses the tokens, `stdexec::task` then keeps its own stop source in its frame,
+and a stop that completes the task inline on main frees that source while its
+`request_stop()` is still running. A `counting_scope` used directly is fine.
+
+`tests/task_scope_test.cpp` checks these, including two hand-off hazards: a waiting
+owner running continuations as they are queued, and a joining thread retiring a task
+as soon as it completes.
+
+## Build
+
+Header-only; needs C++20 and stdexec. Tested against NVIDIA/stdexec
+`fb944c333ae00d11cc0c56e1fb9b2bce04b5e162`.
+
+```sh
+cmake -B build -DSTDEXEC_AFFINE_STDEXEC_SOURCE_DIR=/path/to/stdexec
+cmake --build build && ctest --test-dir build
 ```
 
-If `Executor` is default-constructible, a task receives an implicit default
-executor. A same-type parent still replaces that implicit executor, while an
-executor supplied through `scheduleOn()` is always preserved. This keeps
-unique execution domains such as a main-thread executor convenient without
-conflating separate instances of a serial executor.
+Or directly:
 
-The optional stdexec integration adapts senders and `exec::task` while
-preserving executor affinity:
-
-```cpp
-#include <affine/stdexec.hpp>
+```sh
+STDEXEC=/path/to/stdexec/include
+clang++ -std=c++20 -Iinclude -Itests -isystem $STDEXEC tests/task_scope_test.cpp -o task_scope_test && ./task_scope_test
+clang++ -std=c++20 -Iinclude -Itests -isystem $STDEXEC examples/round_trip.cpp -o round_trip && ./round_trip
 ```
 
-## Synchronous teardown
-
-Detached roots are owned explicitly by a root scope:
-
-```cpp
-#include <affine/root_scope.hpp>
-
-auto root_scope = affine::create_root_scope();
-auto loading = affine::spawn(
-    root_task().scheduleOn(executor), root_scope);
-
-// Cancel and synchronously finish one subtree while the executor stays open:
-loading.shutdown_and_wait();
-
-// On the executor's owner thread during teardown:
-root_scope.close();
-root_scope.drain();
-```
-
-`close()` requests cooperative stop and closes executors that expose a
-`close()` operation. The supplied `main_thread_executor` then claims callbacks
-already submitted to the host queue. Completions arriving after closure are
-placed directly into its local ready queue.
-
-`drain()` keeps every structurally owned coroutine frame alive and drives the
-executor until all roots have completed. Only then are the frames destroyed.
-This is why waiting on the executor thread does not deadlock.
-
-Every `spawn()` returns an `affine::task_handle`. `close()` requests
-cancellation for that task and its detached descendants and returns
-immediately. `shutdown_and_wait()` additionally waits for the subtree: on the
-executor thread it calls `run_until()`, while other threads block on the task's
-completion condition variable. A child wait never closes the executor.
-
-After shutdown begins, an in-flight operation must eventually complete without
-requiring another external host message-loop event. Cancellation is
-cooperative and is not mandatory for every awaitable.
-
-The last `root_scope` handle must not be destroyed while it still owns tasks;
-call `close()` and `drain()` during teardown.
-
-## Host-owned main threads
-
-`<affine/main_thread_executor.hpp>` adapts a host dispatch queue and optional
-event pump. During normal operation it dispatches continuations through the
-host. After `close()`, it stops adding host callbacks and drains locally on its
-owner thread.
-
-Already-submitted host callbacks may still run later as claimed no-ops. A host
-that unloads plug-in code must therefore place its own unload barrier after
-plug-in teardown.
-
-## Owned serial threads
-
-`<affine/serial_executor.hpp>` provides a dedicated single-thread context and
-a copyable executor handle:
-
-```cpp
-affine::single_thread_context context;
-auto executor = context.get_executor();
-
-auto task = work().scheduleOn(executor);
-affine::sync_wait(std::move(task));
-
-context.shutdown_and_wait();
-```
-
-The executor serializes every task body and continuation on its owned thread,
-so mutable data confined to that executor needs no additional locking. The
-context must outlive all of its tasks. Drain root scopes before stopping and
-joining the context; the executor intentionally has no `close()` operation
-that could reject an in-flight continuation during root shutdown.
-
-## Cancellation
-
-Tasks expose cooperative cancellation through their context:
-
-```cpp
-affine::affine_task<void, Executor> work() {
-    auto token = co_await affine::this_task::stop_token;
-    if (token.stop_requested())
-        co_return;
-
-    // cancellable work...
-}
-
-auto task = work().scheduleOn(executor);
-```
-
-Call `task.request_stop()` to request cancellation. Awaitables opt in by
-observing the token. If an operation completes with stop, `sync_wait()` throws
-`affine::operation_cancelled`; use stdexec's `stopped_as_optional` when stop
-should instead become a value such as `std::nullopt`.
-
-`affine/stop_token.hpp` provides `affine::stop_token`, `stop_source`, and
-`stop_callback`. They alias the standard types where supported. macOS deployment
-targets before 11 use a shared stop state and callback implementation without
-newer libc++ runtime dependencies. Callbacks run synchronously on cancellation;
-unregistration waits for an invocation on another thread and permits self-removal.
-
-Define `AFFINE_USE_PORTABLE_STOP_TOKEN=1` consistently across a target to test the
-portable implementation on newer systems. The stdexec integration additionally
-needs a stdexec build with an atomic-wait fallback for older macOS.
-
-## Status
-
-Early development. The executor contract and shutdown API may evolve before
-the first stable release.
+A parent project that already has a `STDEXEC::stdexec` target can `add_subdirectory`
+this repository and link `stdexec_affine::affine`.

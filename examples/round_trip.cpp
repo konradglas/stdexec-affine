@@ -1,12 +1,12 @@
-#include "main_thread_scheduler.h"
-#include "test_main_queue.h"
+#include "affine/main_thread_scheduler.hpp"
+#include "test_main_queue.hpp"
 #include <exec/single_thread_context.hpp>
 #include <iostream>
 #include <thread>
 
 // The whole "framework": a task whose start scheduler type is the main loop.
 struct MainEnv {
-  using start_scheduler_type = playground::MainThreadLoop::Scheduler;
+  using start_scheduler_type = affine::MainThreadLoop::Scheduler;
 };
 template <class T> using MainActorTask = stdexec::task<T, MainEnv>;
 
@@ -21,8 +21,8 @@ MainActorTask<void> loadPreset(std::thread::id mainThread, auto worker, bool &do
 }
 
 int main() {
-  playground::TestMainQueue platformQueue;
-  playground::MainThreadLoop loop([&](auto callback) { platformQueue.post(std::move(callback)); });
+  affine::TestMainQueue platformQueue;
+  affine::MainThreadLoop loop([&](auto callback) { platformQueue.post(std::move(callback)); });
   exec::single_thread_context worker;
   bool done = false;
   loop.sync_wait(loadPreset(std::this_thread::get_id(), worker.get_scheduler(), done));

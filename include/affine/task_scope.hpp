@@ -1,7 +1,7 @@
 #pragma once
 
-#include "main_actor_task.h"
-#include "main_thread_scheduler.h"
+#include "affine/main_actor_task.hpp"
+#include "affine/main_thread_scheduler.hpp"
 
 #include <stdexec/execution.hpp>
 
@@ -15,9 +15,9 @@
 #include <utility>
 #include <vector>
 
-namespace playground {
+namespace affine {
 
-// root_scope / task_handle for MainActorTask, after include/affine/root_scope.hpp, as a tree:
+// root_scope / task_handle for MainActorTask, as a tree:
 // every spawned task gets its own queue (a child domain of its parent's) and scope. Waiting
 // on a node stops nothing else, joins exactly its subtree and pumps only the subtree's
 // queues; the root's shutdown_and_wait stops and joins everything. Handles can be copied and
@@ -307,4 +307,4 @@ inline task_handle spawn(MainActorTask<void> task, const task_handle& parent) {
     return task_handle{detail::task_node::spawn(std::move(task), parent._node)};
 }
 
-} // namespace playground
+} // namespace affine

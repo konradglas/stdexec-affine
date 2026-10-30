@@ -1,5 +1,5 @@
-#include "task_scope.h"
-#include "test_main_queue.h"
+#include "affine/task_scope.hpp"
+#include "test_main_queue.hpp"
 
 #include <exec/single_thread_context.hpp>
 #include <exec/timed_thread_scheduler.hpp>
@@ -12,7 +12,7 @@
 #include <stdexcept>
 #include <thread>
 
-using namespace playground;
+using namespace affine;
 
 namespace {
 

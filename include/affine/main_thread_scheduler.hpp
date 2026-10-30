@@ -13,7 +13,7 @@
 #include <utility>
 #include <vector>
 
-namespace playground {
+namespace affine {
 
 // The hook posts the supplied callback to the owner thread. It must not call it
 // inline, drop it during normal operation, or throw. Shutdown can leave posts pending.
@@ -366,4 +366,4 @@ inline auto MainThreadLoop::Scheduler::Sender::Environment::query(
 
 static_assert(stdexec::scheduler<MainThreadLoop::Scheduler>);
 
-} // namespace playground
+} // namespace affine
