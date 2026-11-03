@@ -2,6 +2,7 @@
 #include "test_main_queue.hpp"
 
 #include <exec/single_thread_context.hpp>
+#include <exec/split.hpp>
 #include <exec/timed_thread_scheduler.hpp>
 
 #include <atomic>
@@ -152,7 +153,36 @@ MainActorTask<void> waitForStop(bool& resumed, bool& destroyed) {
     resumed = true;
 }
 
+// The shape of an access-token wait: every waiter shares one pending wait through split.
+using SharedWait = decltype(exec::split(exec::schedule_after(std::declval<exec::timed_thread_context&>().get_scheduler(), std::chrono::hours(1))));
+
+struct SharedWaitProbe {
+    int waiting = 0;
+    int stopped = 0;
+    bool stopRequestRunning = false;
+    int resumedDuringStopRequest = 0;
+};
+
+// A nested task awaits the split. Its parent frees its frame when it resumes.
+MainActorTask<void> joinSharedWait(SharedWait shared) {
+    co_await std::move(shared);
+}
+
+MainActorTask<void> waitShared(SharedWait shared, SharedWaitProbe& probe) {
+    struct CountStopped {
+        SharedWaitProbe& probe;
+        ~CountStopped() {
+            ++probe.stopped;
+            if (probe.stopRequestRunning)
+                ++probe.resumedDuringStopRequest;
+        }
+    } countStopped{probe};
+    ++probe.waiting;
+    co_await joinSharedWait(std::move(shared));
+}
+
 } // namespace
+ // namespace
 
 int main() {
     mainThread = std::this_thread::get_id();
@@ -379,6 +409,27 @@ int main() {
         check(!ran && !handle.completed(), "schedule(enqueue_scheduler()) on main does not run inline");
         host.pumpUntil([&] { return handle.completed(); });
         check(ran && !ranInside, "The deferred part runs on main on a later turn");
+        scope.shutdown_and_wait();
+        host.queue.drainPosts();
+    }
+
+    {
+        // A stop completes a split waiter inside the stop callback. The waiting task then runs to its end
+        // and frees its nested task's frame there. No stop source may live in that frame.
+        Host host;
+        root_scope scope(host.wakeup());
+        child_scope owner(scope);
+        SharedWait shared = exec::split(exec::schedule_after(timer.get_scheduler(), std::chrono::hours(1)));
+        SharedWaitProbe probe;
+        auto first = spawn(waitShared(shared, probe), owner);
+        auto second = spawn(waitShared(shared, probe), owner);
+        check(probe.waiting == 2, "Both tasks wait on the shared split");
+        probe.stopRequestRunning = true;
+        owner.close();
+        probe.stopRequestRunning = false;
+        owner.wait();
+        check(first.completed() && second.completed() && probe.stopped == 2, "Stopping a scope ends both split waiters");
+        std::cout << "info: waiters that ended inside the stop request: " << probe.resumedDuringStopRequest << std::endl;
         scope.shutdown_and_wait();
         host.queue.drainPosts();
     }

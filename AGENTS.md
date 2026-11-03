@@ -30,6 +30,11 @@ thread) and an ownership tree of task scopes. Read `README.md` for the model; th
 - Stop tokens are `stdexec::inplace_stop_token`, read with `co_await stdexec::read_env(stdexec::get_stop_token)`. They
   are pointers to a stop source in the task's node, with no allocation: never let one outlive the task (passing it into
   work the task awaits is fine). Do not convert to `std::stop_token` unless an API demands it.
+- Never put a different stop-token type into a task's environment, neither by `write_env` nor through a scope that
+  forwards stop to its own source. A `stdexec::task` that receives a token of another type keeps its own stop source
+  in its frame. A stop can complete such a task inline on main, for example as a waiter of `split`. Its parent then
+  frees the frame while that stop source is still running its callbacks. That is a use-after-free in
+  `inplace_stop_source::request_stop()`. The split test in `tests/task_scope_test.cpp` shows the safe case.
 - Cancellation is cooperative. Long CPU work takes the token and checks it at bounded intervals (per line, per item,
   per block), returning early without publishing partial results (e.g. do not fill a shared cache from a cancelled run).
   Code that cannot stop is a gap to fix, not a reason to skip cancellation.
