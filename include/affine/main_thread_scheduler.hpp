@@ -160,17 +160,6 @@ class MainThreadLoop {
             return executeTree();
         }
 
-        void run() {
-            PumpGuard guard(*this);
-            for (;;) {
-                executeTree();
-                std::unique_lock lock(mutex);
-                condition.wait(lock, [this] { return finished || head != nullptr || childReady; });
-                if (finished && head == nullptr && !childReady)
-                    return;
-            }
-        }
-
         void finish() noexcept {
             {
                 std::lock_guard lock(mutex);
@@ -314,7 +303,6 @@ public:
         return stdexec::starts_on(get_scheduler(), std::forward<Sender>(sender));
     }
     std::size_t drain() { return state->drain(); }
-    void run() { state->run(); }
     // Call only after all owned tasks complete; finish is not cancellation.
     void finish() noexcept { state->finish(); }
 
