@@ -1,13 +1,13 @@
 #pragma once
 
-#include <stdexec/execution.hpp>
 #include <cassert>
 #include <condition_variable>
-#include <functional>
 #include <exception>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <stdexec/execution.hpp>
 #include <thread>
 #include <type_traits>
 #include <utility>
@@ -21,30 +21,36 @@ using Wakeup = std::function<void(std::function<void()>)>;
 
 class MainThreadLoop {
     struct Task {
-        Task* next = nullptr;
-        void (*execute)(Task*) noexcept = nullptr;
+        Task *next = nullptr;
+        void (*execute)(Task *) noexcept = nullptr;
     };
 
     struct State : std::enable_shared_from_this<State> {
-        inline static thread_local State* current = nullptr;
+        inline static thread_local State *current = nullptr;
         struct CurrentGuard {
-            explicit CurrentGuard(State& state) : previous(std::exchange(current, &state)) {}
-            ~CurrentGuard() { current = previous; }
-            State* previous;
+            explicit CurrentGuard(State &state)
+                : previous(std::exchange(current, &state)) {}
+            ~CurrentGuard() {
+                current = previous;
+            }
+            State *previous;
         };
         explicit State(Wakeup wakeup, std::shared_ptr<State> parent = nullptr)
-        : wakeup(std::move(wakeup)),
-          owner(parent ? parent->owner : std::this_thread::get_id()),
-          parent(std::move(parent)) {}
+            : wakeup(std::move(wakeup)),
+              owner(parent ? parent->owner : std::this_thread::get_id()),
+              parent(std::move(parent)) {}
 
-        ~State() { assert(head == nullptr); }
+        ~State() {
+            assert(head == nullptr);
+        }
 
         void requireOwner() const {
             if (std::this_thread::get_id() != owner)
-                throw std::logic_error("MainThreadLoop must be pumped on its owner thread");
+                throw std::logic_error(
+                    "MainThreadLoop must be pumped on its owner thread");
         }
 
-        void enqueue(Task* task) noexcept {
+        void enqueue(Task *task) noexcept {
             bool needsWakeup;
             {
                 std::lock_guard lock(mutex);
@@ -59,10 +65,11 @@ class MainThreadLoop {
             if (needsWakeup) {
                 condition.notify_one();
                 // Waits on an ancestor drain this domain too.
-                for (auto* ancestor = parent.get(); ancestor; ancestor = ancestor->parent.get())
+                for (auto *ancestor = parent.get(); ancestor;
+                     ancestor = ancestor->parent.get())
                     ancestor->descendantReady();
-                // Platform callbacks do not own the loop or pending operations. Each domain
-                // posts for itself, so they pump only their own queue.
+                // Platform callbacks do not own the loop or pending operations. Each
+                // domain posts for itself, so they pump only their own queue.
                 wakeup([weak = weak_from_this()] {
                     if (auto state = weak.lock())
                         state->drainQueue();
@@ -87,7 +94,7 @@ class MainThreadLoop {
             std::vector<std::shared_ptr<State>> ready;
             std::lock_guard lock(mutex);
             childReady = false;
-            std::erase_if(children, [&](const std::weak_ptr<State>& weak) {
+            std::erase_if(children, [&](const std::weak_ptr<State> &weak) {
                 auto child = weak.lock();
                 if (!child)
                     return true;
@@ -104,7 +111,7 @@ class MainThreadLoop {
             std::size_t count = 0;
             for (;;) {
                 std::size_t round = executeReady();
-                for (auto& child : childrenWithWork()) {
+                for (auto &child : childrenWithWork()) {
                     PumpGuard guard(*child, true);
                     round += child->executeTree();
                 }
@@ -117,7 +124,7 @@ class MainThreadLoop {
         std::size_t executeReady() {
             std::size_t count = 0;
             for (;;) {
-                Task* batch;
+                Task *batch;
                 {
                     std::lock_guard lock(mutex);
                     batch = std::exchange(head, nullptr);
@@ -126,7 +133,7 @@ class MainThreadLoop {
                 if (!batch)
                     return count;
                 while (batch) {
-                    Task* task = batch;
+                    Task *task = batch;
                     batch = task->next;
                     // Completion is allowed to destroy the operation immediately.
                     task->execute(task);
@@ -136,16 +143,18 @@ class MainThreadLoop {
         }
 
         struct PumpGuard {
-            explicit PumpGuard(State& state, bool allowNonOwner = false)
-            : state(state), execution(state.execution), current(state) {
+            explicit PumpGuard(State &state, bool allowNonOwner = false)
+                : state(state), execution(state.execution), current(state) {
                 if (!allowNonOwner)
                     state.requireOwner();
                 if (state.pumping)
                     throw std::logic_error("MainThreadLoop pump is not reentrant");
                 state.pumping = true;
             }
-            ~PumpGuard() { state.pumping = false; }
-            State& state;
+            ~PumpGuard() {
+                state.pumping = false;
+            }
+            State &state;
             std::unique_lock<std::recursive_mutex> execution;
             CurrentGuard current;
         };
@@ -170,8 +179,8 @@ class MainThreadLoop {
         std::recursive_mutex execution;
         std::mutex mutex;
         std::condition_variable condition;
-        Task* head = nullptr;
-        Task* tail = nullptr;
+        Task *head = nullptr;
+        Task *tail = nullptr;
         std::vector<std::weak_ptr<State>> children;
         bool childReady = false; // Some descendant domain has queued work.
         bool finished = false;
@@ -180,58 +189,65 @@ class MainThreadLoop {
 
     struct WaitReceiver {
         using receiver_concept = stdexec::receiver_t;
-        std::exception_ptr& error;
-        bool& completed;
-        bool& done;
+        std::exception_ptr &error;
+        bool &completed;
+        bool &done;
 
         void set_value() noexcept {
             completed = true;
             done = true;
         }
-        void set_stopped() noexcept { done = true; }
-        template<class Error>
-        void set_error(Error errorValue) noexcept {
+        void set_stopped() noexcept {
+            done = true;
+        }
+        template <class Error> void set_error(Error errorValue) noexcept {
             if constexpr (std::is_same_v<Error, std::exception_ptr>)
                 error = std::move(errorValue);
             else
                 error = std::make_exception_ptr(std::move(errorValue));
             done = true;
         }
-        auto get_env() const noexcept { return stdexec::env{}; }
+        auto get_env() const noexcept {
+            return stdexec::env{};
+        }
     };
 
-public:
+  public:
     class Scheduler {
-    public:
+      public:
         using scheduler_concept = stdexec::scheduler_t;
 
         struct Sender {
             using sender_concept = stdexec::sender_t;
             // Infallible: getting back onto the main thread never fails or stops.
-            using completion_signatures = stdexec::completion_signatures<stdexec::set_value_t()>;
+            using completion_signatures =
+                stdexec::completion_signatures<stdexec::set_value_t()>;
 
-            template<class Receiver>
-            struct Operation : Task {
-                Operation(std::shared_ptr<State> state, bool alwaysEnqueue, Receiver receiver)
-                : state(std::move(state)), alwaysEnqueue(alwaysEnqueue), receiver(std::move(receiver)) {
-                    this->execute = [](Task* task) noexcept {
-                        auto& op = *static_cast<Operation*>(task);
+            template <class Receiver> struct Operation : Task {
+                Operation(std::shared_ptr<State> state, bool alwaysEnqueue,
+                          Receiver receiver)
+                    : state(std::move(state)), alwaysEnqueue(alwaysEnqueue),
+                      receiver(std::move(receiver)) {
+                    this->execute = [](Task *task) noexcept {
+                        auto &op = *static_cast<Operation *>(task);
                         stdexec::set_value(std::move(op.receiver));
                     };
                 }
-                Operation(const Operation&) = delete;
-                Operation(Operation&&) = delete;
+                Operation(const Operation &) = delete;
+                Operation(Operation &&) = delete;
 
                 void start() noexcept {
                     // Keep State alive even if a consumer completes and deletes us.
                     auto retainedState = state;
-                    if (!alwaysEnqueue && (std::this_thread::get_id() == retainedState->owner
-                                          || State::current == retainedState.get())) {
+                    if (!alwaysEnqueue &&
+                        (std::this_thread::get_id() == retainedState->owner ||
+                         State::current == retainedState.get())) {
                         std::lock_guard execution(retainedState->execution);
                         State::CurrentGuard current(*retainedState);
                         {
                             std::lock_guard lock(retainedState->mutex);
-                            assert(!retainedState->finished && "Do not admit work after scope completion");
+                            assert(!retainedState->finished &&
+                                   "Do not admit work after scope completion");
                         }
                         this->execute(this);
                     } else {
@@ -244,7 +260,7 @@ public:
                 Receiver receiver;
             };
 
-            template<class Receiver>
+            template <class Receiver>
             auto connect(Receiver receiver) const noexcept -> Operation<Receiver> {
                 return {state, alwaysEnqueue, std::move(receiver)};
             }
@@ -252,24 +268,29 @@ public:
             struct Environment {
                 std::shared_ptr<State> state;
                 bool alwaysEnqueue;
-                auto query(stdexec::get_completion_scheduler_t<stdexec::set_value_t>) const noexcept -> Scheduler;
+                auto query(stdexec::get_completion_scheduler_t<stdexec::set_value_t>)
+                    const noexcept -> Scheduler;
             };
 
-            auto get_env() const noexcept -> Environment { return {state, alwaysEnqueue}; }
+            auto get_env() const noexcept -> Environment {
+                return {state, alwaysEnqueue};
+            }
             std::shared_ptr<State> state;
             bool alwaysEnqueue;
         };
 
-        auto schedule() const noexcept -> Sender { return {state, alwaysEnqueue}; }
+        auto schedule() const noexcept -> Sender {
+            return {state, alwaysEnqueue};
+        }
         auto query(stdexec::get_forward_progress_guarantee_t) const noexcept {
             return stdexec::forward_progress_guarantee::parallel;
         }
-        bool operator==(const Scheduler&) const = default;
+        bool operator==(const Scheduler &) const = default;
 
-    private:
+      private:
         friend class MainThreadLoop;
         explicit Scheduler(std::shared_ptr<State> state, bool alwaysEnqueue)
-        : state(std::move(state)), alwaysEnqueue(alwaysEnqueue) {}
+            : state(std::move(state)), alwaysEnqueue(alwaysEnqueue) {}
         std::shared_ptr<State> state;
         bool alwaysEnqueue;
     };
@@ -279,12 +300,16 @@ public:
             throw std::invalid_argument("A main-thread wake-up hook is required");
         state = std::make_shared<State>(std::move(wakeup));
     }
-    MainThreadLoop(const MainThreadLoop&) = delete;
-    MainThreadLoop& operator=(const MainThreadLoop&) = delete;
+    MainThreadLoop(const MainThreadLoop &) = delete;
+    MainThreadLoop &operator=(const MainThreadLoop &) = delete;
 
     // Inline completion on the owner thread can reenter downstream user code.
-    auto get_scheduler() const noexcept -> Scheduler { return Scheduler{state, false}; }
-    auto get_enqueue_scheduler() const noexcept -> Scheduler { return Scheduler{state, true}; }
+    auto get_scheduler() const noexcept -> Scheduler {
+        return Scheduler{state, false};
+    }
+    auto get_enqueue_scheduler() const noexcept -> Scheduler {
+        return Scheduler{state, true};
+    }
     // Separate continuation queue, same physical owner and platform dispatcher.
     // The returned sender's scheduler retains the domain state in its operation.
     // The domain is a child of this one: waiting here also pumps it,
@@ -293,17 +318,18 @@ public:
     auto make_domain() const -> std::unique_ptr<MainThreadLoop> {
         return std::unique_ptr<MainThreadLoop>(new MainThreadLoop(state));
     }
-    template<class Sender>
-    auto bind(Sender&& sender) const {
+    template <class Sender> auto bind(Sender &&sender) const {
         return stdexec::starts_on(get_scheduler(), std::forward<Sender>(sender));
     }
     // Call only after all owned tasks complete; finish is not cancellation.
-    void finish() noexcept { state->finish(); }
+    void finish() noexcept {
+        state->finish();
+    }
 
     // Reusable void-sender wait. Explicit takeover requires exclusive ownership
     // of user state: continuations may run on this thread instead of the owner.
-    template<class Sender>
-    bool sync_wait(Sender&& sender, bool allowNonOwnerDrain = false) {
+    template <class Sender>
+    bool sync_wait(Sender &&sender, bool allowNonOwnerDrain = false) {
         State::PumpGuard guard(*state, allowNonOwnerDrain);
         {
             std::lock_guard lock(state->mutex);
@@ -324,16 +350,17 @@ public:
             if (done)
                 break;
             std::unique_lock lock(state->mutex);
-            state->condition.wait(lock, [&] { return state->head != nullptr || state->childReady; });
+            state->condition.wait(
+                lock, [&] { return state->head != nullptr || state->childReady; });
         }
         if (error)
             std::rethrow_exception(error);
         return completed;
     }
 
-private:
+  private:
     explicit MainThreadLoop(std::shared_ptr<State> parent)
-    : state(std::make_shared<State>(parent->wakeup, parent)) {
+        : state(std::make_shared<State>(parent->wakeup, parent)) {
         std::lock_guard lock(parent->mutex);
         parent->children.push_back(state);
     }
@@ -342,7 +369,8 @@ private:
 };
 
 inline auto MainThreadLoop::Scheduler::Sender::Environment::query(
-    stdexec::get_completion_scheduler_t<stdexec::set_value_t>) const noexcept -> Scheduler {
+    stdexec::get_completion_scheduler_t<stdexec::set_value_t>) const noexcept
+    -> Scheduler {
     return Scheduler{state, alwaysEnqueue};
 }
 

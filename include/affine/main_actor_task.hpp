@@ -12,7 +12,6 @@ struct MainEnv {
     using start_scheduler_type = MainThreadLoop::Scheduler;
 };
 
-template<class T = void>
-using MainActorTask = stdexec::task<T, MainEnv>;
+template <class T = void> using MainActorTask = stdexec::task<T, MainEnv>;
 
 } // namespace affine

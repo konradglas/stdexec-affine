@@ -10,7 +10,7 @@ namespace affine {
 
 // Simulates dispatch_async(main) or a Windows message queue for the console host.
 class TestMainQueue {
-public:
+  public:
     void post(std::function<void()> callback) {
         {
             std::lock_guard lock(mutex);
@@ -44,7 +44,7 @@ public:
         }
     }
 
-private:
+  private:
     std::mutex mutex;
     std::condition_variable condition;
     std::deque<std::function<void()>> callbacks;
