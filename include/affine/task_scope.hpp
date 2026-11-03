@@ -224,6 +224,8 @@ class task_node {
             children.swap(_children);
         }
         for (auto &child : children) {
+            // Never blocks: the child's tasks were counted in this scope, so its
+            // count is already zero. Joining closes it, so later spawns are dropped.
             stdexec::sync_wait(child->scope.join());
             child->retire();
             child->_parentLink.reset();
