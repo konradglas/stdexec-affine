@@ -57,6 +57,8 @@ class task_node {
             return !scopes.empty();
         }
 
+        // Required by stdexec::scope_association; only stdexec::associate
+        // calls it, to copy.
         Association try_associate() const noexcept {
             Association copy;
             for (auto &scope : scopes) {
