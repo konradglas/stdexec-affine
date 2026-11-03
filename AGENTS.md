@@ -20,6 +20,8 @@ thread) and an ownership tree of task scopes. Read `README.md` for the model; th
 
 - One owner per piece of async work. An object that starts work holds a `child_scope` (or `task_handle`s) and joins it
   before the state the tasks use is destroyed, normally first thing in its destructor.
+- Keep the tree flat: spawn into the root or the owner's `child_scope`, not under another task. Keep a `task_handle`
+  only for work that is closed or waited on individually.
 - Never immediately invoke a coroutine lambda that captures state: the closure dies while the coroutine still uses it.
   Write a named coroutine function (a member is fine) and pass what it needs as parameters, which live in the frame.
 - A task spawned on the main thread runs inline up to its first hop, and the main scheduler completes inline on main.

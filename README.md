@@ -63,6 +63,11 @@ class Document {
 };
 ```
 
+In practice keep the tree flat: the root plus one `child_scope` per owner, tasks
+spawned directly into them, and a `task_handle` kept only for work that is closed or
+waited on individually (e.g. the current preset load). Spawning under a task is
+supported but rarely needed.
+
 - Every spawned task gets its own queue, a child domain of its parent's
   (`MainThreadLoop::make_domain`). Waiting on a node drains its own queue and its
   descendants', never a sibling's or an ancestor's, so joining the loading task in

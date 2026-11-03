@@ -446,6 +446,24 @@ int main() {
         scope.shutdown_and_wait();
         host.queue.drainPosts();
     }
+    {
+        // Only a join closes a node. A scope whose tasks have all ended, and a task
+        // whose body has ended, still start new tasks until they are joined.
+        Host host;
+        root_scope scope(host.wakeup());
+        child_scope owner(scope);
+        int completed = 0;
+        auto first = spawn(hops(worker, 1, completed), owner);
+        host.pumpUntil([&] { return first.completed(); });
+        auto second = spawn(hops(worker, 1, completed), owner);
+        host.pumpUntil([&] { return second.completed(); });
+        check(completed == 2, "An idle child_scope still starts new tasks");
+        auto underEnded = spawn(hops(worker, 1, completed), first);
+        host.pumpUntil([&] { return underEnded.completed(); });
+        check(completed == 3, "A task whose body has ended still starts children");
+        scope.shutdown_and_wait();
+        host.queue.drainPosts();
+    }
 
     {
         // A task spawned on main runs inline up to its first hop; the enqueue scheduler
