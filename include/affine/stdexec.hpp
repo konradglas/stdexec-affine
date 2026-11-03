@@ -48,11 +48,16 @@ private:
     affine::stop_token _token;
 };
 
+// AGENTIC: A stopped task resumes its awaiter through the executor's queue, also on the executor's own thread.
+// A stop request can complete the task inside a stop callback. An inline resumption would then run the awaiter
+// to its end. The awaiter's frame holds the stop source that is still running its callbacks. Freeing it there
+// makes that stop source read freed memory.
 template<class Executor>
 struct executor_hop {
     Executor _executor;
+    bool _stopped = false;
 
-    bool await_ready() const noexcept { return _executor.is_current_thread(); }
+    bool await_ready() const noexcept { return !_stopped && _executor.is_current_thread(); }
 
     void await_suspend(std::coroutine_handle<> continuation) {
         if (!_executor.schedule(continuation))
@@ -65,12 +70,16 @@ struct executor_hop {
 template<class T, class Context, class Executor>
 auto continue_exec_task_on_executor(exec::basic_task<T, Context> task, Executor executor) -> exec::task<T> {
     std::exception_ptr error;
+    bool stopped = false;
 
     if constexpr (std::is_void_v<T>) {
         try {
             co_await stdexec::stopped_as_error(std::move(task), std::make_exception_ptr(operation_cancelled{}));
+        } catch (const operation_cancelled&) {
+            error = std::current_exception();
+            stopped = true;
         } catch (...) { error = std::current_exception(); }
-        co_await executor_hop<Executor>{ std::move(executor) };
+        co_await executor_hop<Executor>{ std::move(executor), stopped };
         if (error)
             std::rethrow_exception(error);
         co_return;
@@ -79,8 +88,11 @@ auto continue_exec_task_on_executor(exec::basic_task<T, Context> task, Executor 
         value_type* result = nullptr;
         try {
             result = std::addressof(co_await stdexec::stopped_as_error(std::move(task), std::make_exception_ptr(operation_cancelled{})));
+        } catch (const operation_cancelled&) {
+            error = std::current_exception();
+            stopped = true;
         } catch (...) { error = std::current_exception(); }
-        co_await executor_hop<Executor>{ std::move(executor) };
+        co_await executor_hop<Executor>{ std::move(executor), stopped };
         if (error)
             std::rethrow_exception(error);
         co_return static_cast<T>(*result);
@@ -88,8 +100,11 @@ auto continue_exec_task_on_executor(exec::basic_task<T, Context> task, Executor 
         std::optional<std::remove_cv_t<T>> result;
         try {
             result.emplace(co_await stdexec::stopped_as_error(std::move(task), std::make_exception_ptr(operation_cancelled{})));
+        } catch (const operation_cancelled&) {
+            error = std::current_exception();
+            stopped = true;
         } catch (...) { error = std::current_exception(); }
-        co_await executor_hop<Executor>{ std::move(executor) };
+        co_await executor_hop<Executor>{ std::move(executor), stopped };
         if (error)
             std::rethrow_exception(error);
         co_return std::move(*result);
