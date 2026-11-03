@@ -29,6 +29,8 @@ thread) and an ownership tree of task scopes. Read `README.md` for the model; th
   `co_await stdexec::schedule(scope.enqueue_scheduler())`, which always queues.
 - Leave the main thread with `co_await (stdexec::schedule(pool.get_scheduler()) | stdexec::then(...))`. Pass immutable
   input into the work and return results; the work must not touch main-thread state.
+- Run a whole coroutine on a pool with `co_await stdexec::starts_on(pool.get_scheduler(), work())`, where `work()` is a
+  plain `stdexec::task`: it resumes on the pool after its own `co_await`s, and the caller resumes on main afterwards.
 - Stop tokens are `stdexec::inplace_stop_token`, read with `co_await stdexec::read_env(stdexec::get_stop_token)`. They
   are pointers to a stop source in the task's node, with no allocation: never let one outlive the task (passing it into
   work the task awaits is fine). Do not convert to `std::stop_token` unless an API demands it.

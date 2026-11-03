@@ -53,6 +53,22 @@ MainActorTask<int> nested() {
     co_return onMain() ? 7 : -1;
 }
 
+// A plain coroutine for a worker: started there with starts_on, it resumes there after
+// its own co_awaits, even when the awaited work completes on another thread.
+stdexec::task<bool> stayOnWorker(exec::single_thread_context &other) {
+    auto self = std::this_thread::get_id();
+    co_await (stdexec::schedule(other.get_scheduler()) | stdexec::then([] {}));
+    co_return !onMain() && std::this_thread::get_id() == self;
+}
+
+MainActorTask<void> offloadCoroutine(exec::single_thread_context &worker,
+                                     exec::single_thread_context &other,
+                                     bool &innerStayed, bool &outerBack) {
+    innerStayed =
+        co_await stdexec::starts_on(worker.get_scheduler(), stayOnWorker(other));
+    outerBack = onMain();
+}
+
 MainActorTask<void> roundTrip(exec::single_thread_context &worker, bool &done) {
     bool ok = onMain();
     auto workerThread =
@@ -222,6 +238,21 @@ int main() {
         host.pumpUntil([&] { return handle.completed(); });
         check(done, "Body runs on main, hops to a worker, resumes on main, awaits a "
                     "nested MainActorTask, catches a worker exception on main");
+        scope.shutdown_and_wait();
+        host.queue.drainPosts();
+    }
+    {
+        Host host;
+        root_scope scope(host.wakeup());
+        exec::single_thread_context other;
+        bool innerStayed = false, outerBack = false;
+        auto handle =
+            spawn(offloadCoroutine(worker, other, innerStayed, outerBack), scope);
+        host.pumpUntil([&] { return handle.completed(); });
+        check(innerStayed,
+              "A coroutine started on a worker with starts_on resumes there "
+              "after its own co_await");
+        check(outerBack, "The awaiting MainActorTask resumes on main afterwards");
         scope.shutdown_and_wait();
         host.queue.drainPosts();
     }

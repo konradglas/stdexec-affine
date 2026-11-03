@@ -22,6 +22,9 @@ it is kept on the `deprecated/affine-task` branch (tag `affine-task-final`).
 
 - `examples/round_trip.cpp`: starts on main, `co_await`s worker work, comes back to
   main by itself. No explicit hop back to main is needed.
+- A whole coroutine runs on a worker with
+  `co_await stdexec::starts_on(worker, work())`, where `work()` is a plain
+  `stdexec::task`: it stays on the worker across its own `co_await`s.
 - Starting a `MainActorTask` without a main scheduler in the environment
   (e.g. plain `stdexec::sync_wait`) does not compile.
 - `examples/nested.cpp`: a plain `stdexec::task` cannot `co_await` a `MainActorTask`
