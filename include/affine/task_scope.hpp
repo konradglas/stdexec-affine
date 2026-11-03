@@ -186,10 +186,6 @@ class task_node {
         return true;
     }
 
-    [[nodiscard]] MainThreadLoop::Scheduler scheduler() const noexcept {
-        return _loop->get_scheduler();
-    }
-
     [[nodiscard]] MainThreadLoop::Scheduler enqueue_scheduler() const noexcept {
         return _loop->get_enqueue_scheduler();
     }
@@ -320,14 +316,6 @@ class root_scope {
         _node->finish();
     }
 
-    [[nodiscard]] bool completed() const noexcept {
-        return _node->completed();
-    }
-
-    [[nodiscard]] MainThreadLoop::Scheduler scheduler() const noexcept {
-        return _node->scheduler();
-    }
-
     // Always queues, also on the main thread: co_await schedule(enqueue_scheduler())
     // runs the rest of a task on a later turn of the main loop, e.g. after its caller
     // has released its locks.
@@ -395,10 +383,6 @@ class child_scope {
 
     [[nodiscard]] bool completed() const noexcept {
         return _node->completed();
-    }
-
-    [[nodiscard]] MainThreadLoop::Scheduler scheduler() const noexcept {
-        return _node->scheduler();
     }
 
     // Always queues, also on the main thread; see root_scope::enqueue_scheduler.

@@ -447,6 +447,25 @@ int main() {
         host.queue.drainPosts();
     }
     {
+        // Replacing a pending load: shutdown_and_wait on its handle stops and joins it
+        // and its children, and leaves the rest of the scope running.
+        Host host;
+        root_scope scope(host.wakeup());
+        bool loadResumed = false, loadDestroyed = false, childResumed = false,
+             childDestroyed = false, otherResumed = false, otherDestroyed = false;
+        auto load = spawn(waitForever(timer, loadResumed, loadDestroyed), scope);
+        auto child = spawn(waitForever(timer, childResumed, childDestroyed), load);
+        auto other = spawn(waitForever(timer, otherResumed, otherDestroyed), scope);
+        load.shutdown_and_wait();
+        check(load.completed() && child.completed() && loadDestroyed &&
+                  childDestroyed && !loadResumed && !childResumed,
+              "shutdown_and_wait on a handle stops and joins it and its children");
+        check(!other.completed() && !otherDestroyed,
+              "shutdown_and_wait on a handle leaves the rest of the scope running");
+        scope.shutdown_and_wait();
+        host.queue.drainPosts();
+    }
+    {
         // Only a join closes a node. A scope whose tasks have all ended, and a task
         // whose body has ended, still start new tasks until they are joined.
         Host host;
