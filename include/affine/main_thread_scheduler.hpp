@@ -155,11 +155,6 @@ class MainThreadLoop {
             return executeReady();
         }
 
-        std::size_t drain() {
-            PumpGuard guard(*this);
-            return executeTree();
-        }
-
         void finish() noexcept {
             {
                 std::lock_guard lock(mutex);
@@ -292,7 +287,7 @@ public:
     auto get_enqueue_scheduler() const noexcept -> Scheduler { return Scheduler{state, true}; }
     // Separate continuation queue, same physical owner and platform dispatcher.
     // The returned sender's scheduler retains the domain state in its operation.
-    // The domain is a child of this one: draining or waiting here also pumps it,
+    // The domain is a child of this one: waiting here also pumps it,
     // while waiting on the domain pumps only it and its own children. It inherits
     // the owner thread, so it may be created on any thread.
     auto make_domain() const -> std::unique_ptr<MainThreadLoop> {
@@ -302,7 +297,6 @@ public:
     auto bind(Sender&& sender) const {
         return stdexec::starts_on(get_scheduler(), std::forward<Sender>(sender));
     }
-    std::size_t drain() { return state->drain(); }
     // Call only after all owned tasks complete; finish is not cancellation.
     void finish() noexcept { state->finish(); }
 
