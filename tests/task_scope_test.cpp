@@ -93,16 +93,16 @@ MainActorTask<void> waitForever(exec::timed_thread_context &timer, bool &resumed
     resumed = true;
 }
 
-MainActorTask<void> waitForRelease(exec::single_thread_context &worker,
-                                   std::atomic<bool> &release, bool &resumed,
-                                   bool &destroyed) {
+MainActorTask<void> busyUntilStopped(exec::single_thread_context &worker, bool &resumed,
+                                     bool &destroyed) {
     SetOnDestroy guard{destroyed};
-    co_await (stdexec::schedule(worker.get_scheduler()) | stdexec::then([&release] {
-                  while (!release.load())
+    auto token = co_await stdexec::read_env(stdexec::get_stop_token);
+    // Work that polls the task's stop token: it ends only once stop is requested.
+    co_await (stdexec::schedule(worker.get_scheduler()) | stdexec::then([token] {
+                  while (!token.stop_requested())
                       std::this_thread::yield();
               }));
-    // Stop was requested while the worker ran: this await completes stopped and
-    // unwinds.
+    // The work itself completed normally. This await sees the stop and unwinds.
     co_await stdexec::schedule(worker.get_scheduler());
     resumed = true;
 }
@@ -276,17 +276,11 @@ int main() {
     {
         Host host;
         root_scope scope(host.wakeup());
-        std::atomic<bool> release{false};
         bool resumed = false, destroyed = false;
-        auto handle = spawn(waitForRelease(worker, release, resumed, destroyed), scope);
+        auto handle = spawn(busyUntilStopped(worker, resumed, destroyed), scope);
         // Spawned on the owner thread, the task has already started inline and is on
-        // the worker.
-        std::thread releaser([&release] {
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            release.store(true);
-        });
+        // the worker, where it stays until the stop request.
         scope.shutdown_and_wait(); // the host queue is never pumped from here on
-        releaser.join();
         check(handle.completed() && destroyed && !resumed,
               "shutdown_and_wait joins a task blocked on a worker without the host "
               "pumping");
@@ -379,10 +373,12 @@ int main() {
         check(completed == rounds * count,
               "The owner's wait runs every hop of the awaited task");
         scope.shutdown_and_wait();
+        // TODO: To we really need this? just for hygene?
         host.queue.drainPosts();
     }
     {
-        // A joining thread may drop the last handle as soon as the task completes.
+        // TODO: explain
+        //  A joining thread may drop the last handle as soon as the task completes.
         Host host;
         root_scope scope(host.wakeup());
         constexpr int rounds = 1000;
