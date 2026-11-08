@@ -1,5 +1,5 @@
+#include "../tests/test_main_queue.hpp"
 #include "affine/main_thread_scheduler.hpp"
-#include "test_main_queue.hpp"
 #include <exec/single_thread_context.hpp>
 #include <iostream>
 #include <thread>
