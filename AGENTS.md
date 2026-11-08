@@ -88,6 +88,23 @@ that is not `Loading`).
 Not to be confused with a version check against state you do not own (a persisted or remote record that can change
 under you): comparing against that state's version is about the data, not about obsolete work, and is still needed.
 
+## Cleanup: undo only what this task acquired
+
+A scope guard in a task (a `ScopeExit`, a destructor) runs when the task ends, also when it is stopped while a newer
+task already runs. It must undo only what this task did. Resetting shared state (`setLoading(false)`) undoes what every
+task did: an obsolete task that unwinds late turns off the newer task's spinner.
+
+- "Something is happening" state (a spinner, a busy cursor): let each task acquire its own share, counted by the owner
+  and shown while the count is above zero. The share's destructor gives back only this task's part:
+
+  ```cpp
+  auto busy = app.beginLoading();   // ++count; ~Busy does --count, also when stopped
+  ```
+
+  Or derive it from the owner instead of storing it: `isLoading() = !loading.completed()`.
+- "Which result counts" state (the installed preset): last writer wins, guarded by the stop token as in the section
+  above. A stopped task never reaches the assignment.
+
 ## Changing the library
 
 - Keep `child_scope`, `root_scope` and `task_handle` consistent: joining a node joins exactly its subtree and pumps only
