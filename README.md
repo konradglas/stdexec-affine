@@ -31,6 +31,9 @@ it is kept on the `deprecated/affine-task` branch (tag `affine-task-final`).
   directly (compile error: its scheduler is type-erased). It works with
   `co_await stdexec::starts_on(loop.get_scheduler(), mainTask())`.
   Build with `-DDIRECT` to see the error.
+- `examples/loading_spinner.cpp`: interactive. Type a key to load it on a worker while
+  a spinner animates on main; a key typed during a load cancels it. The spinner asks
+  the task's handle (`completed()`), so a cancelled load has nothing to reset.
 
 ## The catch
 
