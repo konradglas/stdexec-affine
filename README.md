@@ -19,14 +19,14 @@ Built on `stdexec`, the reference implementation of C++26 `std::execution`.
 ## Try it
 
 ```sh
-git clone https://github.com/konradglas/stdexec-affine && cd stdexec-affine && cmake -B build && cmake --build build --target stdexec_affine_example_loading_spinner && ./build/stdexec_affine_example_loading_spinner
+git clone https://github.com/konradglas/stdexec-affine && cd stdexec-affine && cmake -B build && cmake --build build --target spinner && ./build/spinner
 ```
 
 Type a key: it loads on a worker while the spinner keeps spinning on main.
 Type another one before it's done: the old load is cancelled, the new one wins.
 `q` quits.
 
-Then open `examples/loading_spinner.cpp` and break things.
+Then open `examples/spinner.cpp` and break things.
 
 ## Who owns a task?
 
