@@ -21,7 +21,7 @@ namespace affine {
 // root_scope / child_scope / task_handle for MainActorTask, as a tree:
 // every spawned task gets its own queue (a child domain of its parent's) and scope.
 // Waiting on a node stops nothing else, joins exactly its subtree and pumps only the
-// subtree's queues; the root's shutdown_and_wait stops and joins everything. Handles
+// subtree's queues; the root's close_and_wait stops and joins everything. Handles
 // can be copied and dropped freely: a parent keeps its children until its own wait
 // joins them. A child_scope is a node without a task, for an owner that spawns tasks
 // over its lifetime.
@@ -272,7 +272,7 @@ class task_handle {
             _node->wait(allowNonOwnerDrain);
     }
 
-    void shutdown_and_wait(bool allowNonOwnerDrain = false) const {
+    void close_and_wait(bool allowNonOwnerDrain = false) const {
         close();
         wait(allowNonOwnerDrain);
     }
@@ -305,12 +305,12 @@ class root_scope {
     root_scope &operator=(const root_scope &) = delete;
 
     ~root_scope() {
-        shutdown_and_wait();
+        close_and_wait();
     }
 
     // Requests stop for every task, then joins them all, draining every queue on this
     // thread.
-    void shutdown_and_wait() {
+    void close_and_wait() {
         if (std::exchange(_joined, true))
             return;
         _node->close();
@@ -364,7 +364,7 @@ class child_scope {
     child_scope &operator=(const child_scope &) = delete;
 
     ~child_scope() {
-        shutdown_and_wait();
+        close_and_wait();
     }
 
     // Requests stop for every task in this scope; never waits.
@@ -378,7 +378,7 @@ class child_scope {
         _node->wait(allowNonOwnerDrain);
     }
 
-    void shutdown_and_wait(bool allowNonOwnerDrain = false) const {
+    void close_and_wait(bool allowNonOwnerDrain = false) const {
         close();
         wait(allowNonOwnerDrain);
     }

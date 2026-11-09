@@ -100,7 +100,7 @@ class MyPlugin : public Plugin {
           }) {}
     // Join the tasks before the worker and the members they use are destroyed.
     ~MyPlugin() {
-        _root.shutdown_and_wait();
+        _root.close_and_wait();
     }
     void onEvent(char evt) override {
         // Latest wins: a load still running is cancelled.

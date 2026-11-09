@@ -238,7 +238,7 @@ int main() {
         host.pumpUntil([&] { return handle.completed(); });
         check(done, "Body runs on main, hops to a worker, resumes on main, awaits a "
                     "nested MainActorTask, catches a worker exception on main");
-        scope.shutdown_and_wait();
+        scope.close_and_wait();
         host.queue.drainPosts();
     }
     {
@@ -253,7 +253,7 @@ int main() {
               "A coroutine started on a worker with starts_on resumes there "
               "after its own co_await");
         check(outerBack, "The awaiting MainActorTask resumes on main afterwards");
-        scope.shutdown_and_wait();
+        scope.close_and_wait();
         host.queue.drainPosts();
     }
     {
@@ -268,9 +268,9 @@ int main() {
         check(closedDestroyed && !closedResumed,
               "close() unwinds that task without resuming it, without waiting");
         check(!other.completed(), "close() leaves the other tasks running");
-        scope.shutdown_and_wait();
+        scope.close_and_wait();
         check(other.completed() && otherDestroyed && !otherResumed,
-              "shutdown_and_wait stops and joins the rest");
+              "close_and_wait stops and joins the rest");
         host.queue.drainPosts();
     }
     {
@@ -280,9 +280,9 @@ int main() {
         auto handle = spawn(busyUntilStopped(worker, resumed, destroyed), scope);
         // Spawned on the owner thread, the task has already started inline and is on
         // the worker, where it stays until the stop request.
-        scope.shutdown_and_wait(); // the host queue is never pumped from here on
+        scope.close_and_wait(); // the host queue is never pumped from here on
         check(handle.completed() && destroyed && !resumed,
-              "shutdown_and_wait joins a task blocked on a worker without the host "
+              "close_and_wait joins a task blocked on a worker without the host "
               "pumping");
         host.queue.drainPosts();
     }
@@ -295,13 +295,13 @@ int main() {
         host.pumpUntil([&] { return handle.completed(); });
         check(reported == 1,
               "An exception escaping a spawned task reaches the error handler");
-        scope.shutdown_and_wait();
+        scope.close_and_wait();
         host.queue.drainPosts();
     }
     {
         Host host;
         root_scope scope(host.wakeup());
-        scope.shutdown_and_wait();
+        scope.close_and_wait();
         bool done = false;
         auto handle = spawn(roundTrip(worker, done), scope);
         check(handle.completed() && !done,
@@ -341,9 +341,9 @@ int main() {
               "wait() on a handle joins and pumps its children");
         check(b.resumed == std::thread::id{} && !handleB.completed(),
               "wait() on a handle never pumps a sibling");
-        scope.shutdown_and_wait();
+        scope.close_and_wait();
         check(b.stopped && b.resumed == mainThread && handleB.completed(),
-              "shutdown_and_wait stops, pumps and joins the rest without waiting "
+              "close_and_wait stops, pumps and joins the rest without waiting "
               "handles first");
         host.queue.drainPosts();
     }
@@ -357,7 +357,7 @@ int main() {
         handle.close();
         check(destroyed && !resumed && handle.completed(),
               "A stop on main may complete and free the task inline");
-        scope.shutdown_and_wait();
+        scope.close_and_wait();
         host.queue.drainPosts();
     }
     {
@@ -372,7 +372,7 @@ int main() {
             spawn(hops(worker, count, completed), scope).wait();
         check(completed == rounds * count,
               "The owner's wait runs every hop of the awaited task");
-        scope.shutdown_and_wait();
+        scope.close_and_wait();
         // TODO: To we really need this? just for hygene?
         host.queue.drainPosts();
     }
@@ -392,7 +392,7 @@ int main() {
             joiner.join();
         }
         check(completed == rounds, "Joining threads run and retire every task");
-        scope.shutdown_and_wait();
+        scope.close_and_wait();
         host.queue.drainPosts();
     }
 
@@ -406,19 +406,19 @@ int main() {
         auto firstTask = spawn(waitForever(timer, firstResumed, firstDestroyed), first);
         auto secondTask =
             spawn(waitForever(timer, secondResumed, secondDestroyed), second);
-        first.shutdown_and_wait();
+        first.close_and_wait();
         check(firstTask.completed() && firstDestroyed && !firstResumed &&
                   first.completed(),
-              "child_scope::shutdown_and_wait stops and joins the scope's tasks");
+              "child_scope::close_and_wait stops and joins the scope's tasks");
         check(!secondTask.completed() && !second.completed(),
-              "child_scope::shutdown_and_wait leaves a sibling scope running");
+              "child_scope::close_and_wait leaves a sibling scope running");
         bool lateDone = false;
         auto late = spawn(roundTrip(worker, lateDone), first);
         check(late.completed() && !lateDone,
               "A task spawned into a joined child_scope never starts and is completed");
-        scope.shutdown_and_wait();
+        scope.close_and_wait();
         check(secondTask.completed() && secondDestroyed && !secondResumed,
-              "The root's shutdown_and_wait joins child scopes nobody waited on");
+              "The root's close_and_wait joins child scopes nobody waited on");
         host.queue.drainPosts();
     }
     {
@@ -434,7 +434,7 @@ int main() {
         }
         check(handle.completed() && destroyed && !resumed,
               "Destroying a child_scope stops and joins its tasks");
-        scope.shutdown_and_wait();
+        scope.close_and_wait();
         host.queue.drainPosts();
     }
     {
@@ -445,8 +445,8 @@ int main() {
         child_scope owner(scope);
         bool resumed = false, destroyed = false;
         auto handle = spawn(waitForever(timer, resumed, destroyed), owner);
-        scope.shutdown_and_wait();
-        owner.shutdown_and_wait();
+        scope.close_and_wait();
+        owner.close_and_wait();
         bool done = false;
         auto late = spawn(roundTrip(worker, done), owner);
         check(handle.completed() && destroyed && late.completed() && !done,
@@ -470,11 +470,11 @@ int main() {
         parentTask.wait();
         check(child.completed() && destroyed && !resumed && parent.stopped,
               "close() and wait() on a task reach a child_scope under it");
-        scope.shutdown_and_wait();
+        scope.close_and_wait();
         host.queue.drainPosts();
     }
     {
-        // Replacing a pending load: shutdown_and_wait on its handle stops and joins it
+        // Replacing a pending load: close_and_wait on its handle stops and joins it
         // and its children, and leaves the rest of the scope running.
         Host host;
         root_scope scope(host.wakeup());
@@ -483,13 +483,13 @@ int main() {
         auto load = spawn(waitForever(timer, loadResumed, loadDestroyed), scope);
         auto child = spawn(waitForever(timer, childResumed, childDestroyed), load);
         auto other = spawn(waitForever(timer, otherResumed, otherDestroyed), scope);
-        load.shutdown_and_wait();
+        load.close_and_wait();
         check(load.completed() && child.completed() && loadDestroyed &&
                   childDestroyed && !loadResumed && !childResumed,
-              "shutdown_and_wait on a handle stops and joins it and its children");
+              "close_and_wait on a handle stops and joins it and its children");
         check(!other.completed() && !otherDestroyed,
-              "shutdown_and_wait on a handle leaves the rest of the scope running");
-        scope.shutdown_and_wait();
+              "close_and_wait on a handle leaves the rest of the scope running");
+        scope.close_and_wait();
         host.queue.drainPosts();
     }
     {
@@ -507,7 +507,7 @@ int main() {
         auto underEnded = spawn(hops(worker, 1, completed), first);
         host.pumpUntil([&] { return underEnded.completed(); });
         check(completed == 3, "A task whose body has ended still starts children");
-        scope.shutdown_and_wait();
+        scope.close_and_wait();
         host.queue.drainPosts();
     }
 
@@ -526,7 +526,7 @@ int main() {
               "schedule(enqueue_scheduler()) on main does not run inline");
         host.pumpUntil([&] { return handle.completed(); });
         check(ran && !ranInside, "The deferred part runs on main on a later turn");
-        scope.shutdown_and_wait();
+        scope.close_and_wait();
         host.queue.drainPosts();
     }
 
@@ -551,7 +551,7 @@ int main() {
               "Stopping a scope ends both split waiters");
         std::cout << "info: waiters that ended inside the stop request: "
                   << probe.resumedDuringStopRequest << std::endl;
-        scope.shutdown_and_wait();
+        scope.close_and_wait();
         host.queue.drainPosts();
     }
 
