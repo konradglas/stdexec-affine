@@ -22,9 +22,9 @@ Built on `stdexec`, the reference implementation of C++26 `std::execution`.
 git clone https://github.com/konradglas/stdexec-affine && cd stdexec-affine && cmake -B build && cmake --build build --target spinner && ./build/spinner
 ```
 
-Type a key: it loads on a worker while the spinner keeps spinning on main.
-Type another one before it's done: the old load is cancelled, the new one wins.
-`q` quits.
+Type a letter: a worker reads a word list and picks a random word starting with it,
+while the spinner keeps spinning on main. Type another letter before it's done: the old
+lookup is cancelled, the new one wins. Esc quits.
 
 Then open `examples/spinner.cpp` and break things.
 
