@@ -19,11 +19,7 @@ Built on `stdexec`, the reference implementation of C++26 `std::execution`.
 ## Try it
 
 ```sh
-git clone https://github.com/konradglas/stdexec-affine
-git clone https://github.com/NVIDIA/stdexec
-git -C stdexec checkout fb944c333ae00d11cc0c56e1fb9b2bce04b5e162
-cd stdexec-affine
-clang++ -std=c++20 -Iinclude -isystem ../stdexec/include examples/loading_spinner.cpp -o spinner && ./spinner
+git clone https://github.com/konradglas/stdexec-affine && cd stdexec-affine && cmake -B build && cmake --build build --target stdexec_affine_example_loading_spinner && ./build/stdexec_affine_example_loading_spinner
 ```
 
 Type a key: it loads on a worker while the spinner keeps spinning on main.
@@ -62,14 +58,14 @@ Talks worth watching:
 
 ## Use it
 
-Header-only, C++20. With CMake, either point it at a stdexec checkout:
+Header-only, C++20. Clone, build, run the tests (CMake fetches the tested stdexec revision):
 
 ```sh
-cmake -B build -DSTDEXEC_AFFINE_STDEXEC_SOURCE_DIR=/path/to/stdexec
-cmake --build build && ctest --test-dir build
+git clone https://github.com/konradglas/stdexec-affine && cd stdexec-affine && cmake -B build && cmake --build build && ctest --test-dir build
 ```
 
-or `add_subdirectory` it into a project that already has `STDEXEC::stdexec` and link
+To use your own stdexec checkout, pass `-DSTDEXEC_AFFINE_STDEXEC_SOURCE_DIR=/path/to/stdexec`.
+Or `add_subdirectory` it into a project that already has `STDEXEC::stdexec` and link
 `stdexec_affine::affine`.
 
 Writing your own tasks? `AGENTS.md` has the rules of thumb (for people too).

@@ -11,17 +11,22 @@ target_include_directories(stdexec_affine INTERFACE
     $<INSTALL_INTERFACE:include>)
 
 # The library is built on stdexec. Use the parent project's STDEXEC::stdexec target if it has one, otherwise a stdexec
-# checkout given here (tested revision: NVIDIA/stdexec fb944c333ae00d11cc0c56e1fb9b2bce04b5e162).
-set(STDEXEC_AFFINE_STDEXEC_SOURCE_DIR "" CACHE PATH "Path to a stdexec checkout")
+# checkout given here, otherwise fetch the tested revision.
+set(STDEXEC_AFFINE_STDEXEC_SOURCE_DIR "" CACHE PATH "Path to a stdexec checkout (empty: fetch the tested revision)")
 if(NOT TARGET STDEXEC::stdexec)
-  if(NOT STDEXEC_AFFINE_STDEXEC_SOURCE_DIR)
-    message(FATAL_ERROR "stdexec_affine needs stdexec: set STDEXEC_AFFINE_STDEXEC_SOURCE_DIR or provide STDEXEC::stdexec")
-  endif()
   set(STDEXEC_BUILD_TESTS OFF)
   set(STDEXEC_BUILD_EXAMPLES OFF)
-  add_subdirectory(${STDEXEC_AFFINE_STDEXEC_SOURCE_DIR}
-                   ${CMAKE_CURRENT_BINARY_DIR}/stdexec-build
-                   EXCLUDE_FROM_ALL)
+  if(STDEXEC_AFFINE_STDEXEC_SOURCE_DIR)
+    add_subdirectory(${STDEXEC_AFFINE_STDEXEC_SOURCE_DIR}
+                     ${CMAKE_CURRENT_BINARY_DIR}/stdexec-build
+                     EXCLUDE_FROM_ALL)
+  else()
+    include(FetchContent)
+    FetchContent_Declare(stdexec
+      GIT_REPOSITORY https://github.com/NVIDIA/stdexec.git
+      GIT_TAG fb944c333ae00d11cc0c56e1fb9b2bce04b5e162)
+    FetchContent_MakeAvailable(stdexec)
+  endif()
 endif()
 target_link_libraries(stdexec_affine INTERFACE STDEXEC::stdexec)
 
