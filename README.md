@@ -18,6 +18,20 @@ template <class T = void> using MainActorTask = stdexec::task<T, MainEnv>;
 The earlier `affine_task` / `main_thread_executor` library is no longer developed;
 it is kept on the `deprecated/affine-task` branch (tag `affine-task-final`).
 
+## From the ADC talk
+
+The demo from the talk, from callbacks to coroutines step by step:
+[konradglas/adc-coroutines-demo](https://github.com/konradglas/adc-coroutines-demo).
+
+Talks worth watching:
+
+- Gor Nishanov, [Nano-coroutines to the Rescue!](https://www.youtube.com/watch?v=j9tlJAqMV7U) (CppCon 2018):
+  how cheap a coroutine frame can be: interleaving lookups to hide memory latency.
+- Lewis Baker, [Structured Concurrency: Writing Safer Concurrent Code with Coroutines](https://www.youtube.com/watch?v=1Wy5sq3s2rg&t=217s)
+  (CppCon 2019): why every task needs an owner.
+- Goran Arandelovic, [Introduction to Sender Receiver framework and std::execution](https://www.youtube.com/watch?v=8V2bfeUZ31c&t=1655s)
+  (using std::cpp): senders, receivers and `stdexec`.
+
 ## Behaviour
 
 - `examples/round_trip.cpp`: starts on main, `co_await`s worker work, comes back to
