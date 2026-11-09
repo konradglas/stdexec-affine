@@ -57,8 +57,8 @@ The demo from the talk, from callbacks to coroutines step by step:
 Talks worth watching:
 
 - Gor Nishanov, [Nano-coroutines to the Rescue!](https://www.youtube.com/watch?v=j9tlJAqMV7U) (CppCon 2018)
-- Lewis Baker, [Structured Concurrency: Writing Safer Concurrent Code with Coroutines](https://www.youtube.com/watch?v=1Wy5sq3s2rg&t=217s) (CppCon 2019)
-- Goran Arandelovic, [Introduction to Sender Receiver framework and std::execution](https://www.youtube.com/watch?v=8V2bfeUZ31c&t=1655s) (using std::cpp)
+- Lewis Baker, [Structured Concurrency: Writing Safer Concurrent Code with Coroutines](https://www.youtube.com/watch?v=1Wy5sq3s2rg) (CppCon 2019)
+- Goran Arandelovic, [Introduction to Sender Receiver framework and std::execution](https://www.youtube.com/watch?v=8V2bfeUZ31c) (using std::cpp)
 
 ## Use it
 
