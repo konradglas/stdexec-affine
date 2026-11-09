@@ -1,7 +1,7 @@
 // Interactive: type a letter and a worker looks up a random word starting with it,
 // while a spinner animates on main. A key typed during a lookup cancels it (latest wins).
-// Esc quits. POSIX terminals only. Run it from the repository root: it reads
-// examples/words.txt (from Webster's 2nd International, public domain).
+// Esc quits. POSIX terminals only. It reads examples/words.txt (from Webster's 2nd
+// International, public domain).
 #include "../tests/test_main_queue.hpp"
 #include "affine/task_scope.hpp"
 #include <array>
@@ -19,6 +19,11 @@
 #include <unistd.h>
 
 using namespace affine;
+
+// CMake passes the absolute path; built by hand, run it from the repository root.
+#ifndef WORDS_FILE
+#define WORDS_FILE "examples/words.txt"
+#endif
 using namespace std::chrono_literals;
 
 struct Plugin {
@@ -131,7 +136,7 @@ class MyPlugin : public Plugin {
     // the letter. Checks the stop token on every line, so a newer key stops it early.
     static stdexec::task<std::string> findWord(char letter) {
         auto stop = co_await stdexec::get_stop_token();
-        std::ifstream file("examples/words.txt");
+        std::ifstream file(WORDS_FILE);
         std::vector<std::string> matches;
         std::string line;
         for (int n = 0; std::getline(file, line); ++n) {
@@ -163,8 +168,8 @@ class MyPlugin : public Plugin {
 };
 
 int main() {
-    if (!std::ifstream("examples/words.txt")) {
-        std::cerr << "examples/words.txt not found: run this from the repository root\n";
+    if (!std::ifstream(WORDS_FILE)) {
+        std::cerr << WORDS_FILE " not found\n";
         return 1;
     }
     TestMainQueue queue;
